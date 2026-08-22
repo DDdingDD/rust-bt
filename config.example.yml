@@ -1,11 +1,13 @@
 # bt CLI 回测配置示例：`bt config.yml`
 #
-# 必填：data.*（数据路径）与 period.*（回测区间）。
+# 必填：signal（信号路径）、data.*（行情数据路径）与 period.*（回测区间）。
 # 其余字段均可省略，默认值即本文件中所示（对齐 examples/run_backtest.rs）。
 
-# 数据路径（必填）
+# 信号 CSV 路径（必填）
+signal: "tmp_data/pred.csv"
+
+# 行情数据路径（必填）
 data:
-  signal: "tmp_data/pred.csv"        # 信号 CSV
   stock_bar: "tmp_data/stock_bar.csv" # 股票日行情 CSV
   benchmark: "tmp_data/benchmark.csv" # 基准收益 CSV
 

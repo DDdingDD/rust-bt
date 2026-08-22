@@ -1,7 +1,7 @@
 //! YAML 回测配置（供 `bt <config.yml>` CLI 使用）。
 //!
-//! 必填：数据路径（`data.*`）与回测区间（`period.*`）；其余字段均可省略，
-//! 默认值对齐 `examples/run_backtest.rs` 的取值。
+//! 必填：信号路径（`signal`）、行情数据路径（`data.*`）与回测区间（`period.*`）；
+//! 其余字段均可省略，默认值对齐 `examples/run_backtest.rs` 的取值。
 
 use anyhow::{anyhow, Context};
 use serde::Deserialize;
@@ -10,6 +10,8 @@ use serde::Deserialize;
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct BtConfig {
+    /// 信号 CSV 路径（pred.csv，必填）。
+    pub signal: Option<String>,
     pub data: DataConfig,
     pub period: PeriodConfig,
     pub account: AccountConfig,
@@ -34,7 +36,7 @@ impl BtConfig {
 
     fn validate(&self) -> anyhow::Result<()> {
         for (key, val) in [
-            ("data.signal", &self.data.signal),
+            ("signal", &self.signal),
             ("data.stock_bar", &self.data.stock_bar),
             ("data.benchmark", &self.data.benchmark),
             ("period.start_date", &self.period.start_date),
@@ -56,7 +58,7 @@ impl BtConfig {
     // ---- 必填字段访问器（load 已校验，此处直接 unwrap） ----
 
     pub fn signal(&self) -> &str {
-        self.data.signal.as_deref().expect("load 已校验")
+        self.signal.as_deref().expect("load 已校验")
     }
     pub fn stock_bar(&self) -> &str {
         self.data.stock_bar.as_deref().expect("load 已校验")
@@ -75,6 +77,7 @@ impl BtConfig {
 impl Default for BtConfig {
     fn default() -> Self {
         Self {
+            signal: None,
             data: DataConfig::default(),
             period: PeriodConfig::default(),
             account: AccountConfig::default(),
@@ -87,12 +90,10 @@ impl Default for BtConfig {
     }
 }
 
-/// 数据文件路径（全部必填）。
+/// 行情数据文件路径（全部必填）。
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
 pub struct DataConfig {
-    /// 信号 CSV（pred.csv）。
-    pub signal: Option<String>,
     /// 股票日行情 CSV（stock_bar.csv）。
     pub stock_bar: Option<String>,
     /// 基准收益 CSV（benchmark.csv）。
@@ -236,8 +237,8 @@ mod tests {
     use super::*;
 
     const MINIMAL_YAML: &str = r#"
+signal: "tmp_data/pred.csv"
 data:
-  signal: "tmp_data/pred.csv"
   stock_bar: "tmp_data/stock_bar.csv"
   benchmark: "tmp_data/benchmark.csv"
 period:
@@ -287,14 +288,14 @@ period:
   end_date: "2026-06-01"
 "#;
         let err = parse(yaml).unwrap_err().to_string();
-        assert!(err.contains("data.signal"), "报错应含字段名: {err}");
+        assert!(err.contains("signal"), "报错应含字段名: {err}");
     }
 
     #[test]
     fn full_config_overrides_defaults() {
         let yaml = r#"
+signal: "s.csv"
 data:
-  signal: "s.csv"
   stock_bar: "b.csv"
   benchmark: "m.csv"
 period:
