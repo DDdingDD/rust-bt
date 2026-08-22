@@ -1,0 +1,18 @@
+[package]
+name = "rust-bt"
+version = "0.1.0"
+edition = "2021"
+description = "A 股日频回测系统（依据 doc/specification.md 与 doc/architecture.md 实现）"
+
+[dependencies]
+polars = { version = "0.44", default-features = false, features = ["csv"] }
+chrono = { version = "0.4", default-features = false, features = ["std", "alloc"] }
+thiserror = "2"
+anyhow = "1"
+log = "0.4"
+plotters = "0.3"
+indicatif = "0.17"
+
+[dev-dependencies]
+env_logger = "0.11"
+tempfile = "3"
