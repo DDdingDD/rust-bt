@@ -38,7 +38,7 @@
 └─────────────────────────────────────────────┘
 ```
 
-依赖方向自上而下，禁止反向依赖：`report` 不依赖 `backtest`；`strategy` / `exchange` 互不依赖，均由 `backtest` 编排。
+依赖方向自上而下，禁止反向依赖：`report` 不依赖 `backtest`；`strategy` / `exchange` 互不依赖（共用的 `TradableInfo` / `StockTradable` 类型下沉至基础层 `types`，见 §4.1/§4.6），均由 `backtest` 编排。
 
 ---
 
@@ -48,10 +48,12 @@
 rust-bt/
 ├── Cargo.toml
 ├── src/
-│   ├── lib.rs                  # 公开 re-export（load_signal, BTData, Account, Exchange,
-│   │                           #  Backtest, Strategy, TopkDropoutStrategy, BTResult, Report）
+│   ├── lib.rs                  # 公开 re-export（load_signal, Signal, BTData, Account, Exchange,
+│   │                           #  Backtest, Strategy, TopkDropoutStrategy, BTResult, Report,
+│   │                           #  Decision, Order 等实现自定义策略所需类型）
 │   ├── error.rs                # BtError（thiserror 类型化错误，见 §8）
-│   ├── types.rs                # DayIdx、DealPrice、ExcessMethod、BenchmarkName、instrument 编解码
+│   ├── types.rs                # DayIdx、DealPrice、ExcessMethod、BenchmarkName、instrument 编解码、
+│   │                           #  TradableInfo/StockTradable（strategy 与 exchange 共用，见 §4.6）
 │   ├── data/
 │   │   ├── mod.rs              # BTData 构建器（new/load_stock_bar/load_benchmark/build）
 │   │   ├── calendar.rs         # TradingCalendar：交易日序列、区间对齐与校验
@@ -66,7 +68,7 @@ rust-bt/
 │   │   ├── market.rs           # DailyMarketStore：limit 预计算、可交易性、按日 SoA 视图
 │   │   └── rules.rs            # 纯函数规则：滑点、费用与 min_cost 反解、整手取整（含科创板）
 │   ├── strategy/
-│   │   ├── mod.rs              # Strategy trait、StrategyContext、PostSellContext、TradableInfo
+│   │   ├── mod.rs              # Strategy trait、StrategyContext、PostSellContext
 │   │   ├── common.rs           # 可复用构件：排名（同分字典序）、等权资金分配、金额->股数换算
 │   │   └── topk_dropout.rs     # TopkDropoutStrategy
 │   ├── backtest.rs             # Backtest：主循环、两阶段撮合编排、延期校验
@@ -79,7 +81,7 @@ rust-bt/
 └── tests/
     ├── acceptance/             # 合成用例精确验收（手算对拍）
     │   ├── mod.rs
-    │   └── cases/              # 每用例一个文件：limit、paused、factor、delist、min_cost、lot、cash、两阶段核减
+    │   └── cases/              # 每用例一个文件：limit、paused、factor、delist、min_cost、lot、cash、两阶段核减、期初建仓、deal_price 列无效
     ├── data/synthetic/         # 合成 CSV（3~5 只股票、约 10 个交易日）
     └── smoke_tmp_data.rs       # tmp_data 端到端冒烟（数据缺失时自动跳过）
 ```
@@ -110,6 +112,8 @@ pub fn format_instrument(code: Code) -> Result<String>; // 600000 -> "SH600000"
 ```
 
 反向映射规则：数字段首位 `6` → `SH`；`0` / `3` → `SZ`；其余（`4`/`8`/`9`，北交所段）当前报错，接入北交所时扩展，编码规则不变。
+
+`types.rs` 同时承载 `TradableInfo` / `StockTradable`（定义见 §4.6）：作为 `strategy`（决策可见）与 `exchange`（market.rs 构建）的共用类型置于基础层，两模块因此互不依赖（§2）。
 
 ### 4.2 数据层
 
@@ -200,7 +204,14 @@ pub struct Account {
     daily: Vec<DailyRecord>,                // PortfolioMetrics 源数据（逐日 push）
     hist_positions: Vec<HistPositionRow>,   // 逐日持仓快照（导出 hist_position 用）
 }
-struct DailyRecord { day: DayIdx, account: f64, value: f64, cash: f64, turnover_amount: f64, cost: f64 }
+impl Account {
+    pub fn new(cash: f64) -> Self;          // 期初全现金；期初资金随 BTResult 导出（initial_cash，§4.9）
+}
+struct DailyRecord {
+    day: DayIdx, account: f64, value: f64, cash: f64,
+    turnover_amount: f64,                   // 当日双边成交金额 Σ(deal_price × deal_volume)，含滑点口径
+    cost: f64,                              // 当日交易费用
+}
 ```
 
 账户职责（对应规范"回测主循环时序"第 2/4/5 步）：
@@ -215,20 +226,23 @@ struct DailyRecord { day: DayIdx, account: f64, value: f64, cash: f64, turnover_
 ```rust
 /// 策略在 T_exec 日可见的全部信息（规范"信息边界"的编译期落实）
 pub struct StrategyContext<'a> {
-    pub signal: Option<&'a SignalDay>,  // T−1 日信号；None 表示无信号（持仓不动）
+    pub signal: &'a SignalDay,          // T−1 日信号；无信号日 Backtest 直接跳过决策（§4.8 主循环
+                                        // a 步，引擎级保证），gen_decision 不会被以"无信号"状态调用
     pub positions: &'a HashMap<Code, PositionEntry>,  // 复权调整后的当前持仓
     pub cash: f64,
     pub tradable: &'a TradableInfo,     // T_exec 日可交易性
     pub day: DayIdx,
 }
 
+// TradableInfo / StockTradable 定义于 types.rs（§4.1）：strategy（决策可见）与 exchange
+// （market.rs 构建）共用同一类型，两模块互不依赖、口径一致（§2、D4）
 pub struct StockTradable {
     pub suspended: bool,     // paused = 1 或 close 缺失
     pub limit_buy: bool,
     pub limit_sell: bool,
     pub volume_cap: f64,     // volume × volume_threshold；threshold = None 时 f64::INFINITY
     pub deal_price: f64,     // T_exec 日 deal_price 列（委托定价与金额换算）
-    pub is_st: bool,
+    pub is_st: bool,        // 规范 forbid_st 参数所需；ST 状态盘前公开、非价格信息，不属前视
 }
 pub struct TradableInfo { /* 当日 SoA + Code -> 行索引 */ }
 impl TradableInfo { pub fn get(&self, code: Code) -> Option<StockTradable>; } // None = 当日无行情
@@ -257,7 +271,7 @@ pub struct PostSellContext<'a> {
 }
 ```
 
-`TopkDropoutStrategy { top_n, drop_n, only_tradable, forbid_st }`：按规范"内置策略"实现排名、卖出、资金分配（毛额口径预期回款、一次性确定金额不重新分配），`Decision.target_positions = Some(top_n)`，买单按 score 降序、同分按 code 升序（字典序确定性），核减使用 trait 默认钩子。排名、同分比较、等权分配、金额→股数换算等通用逻辑实现于 `strategy/common.rs`，供后续新策略复用。
+`TopkDropoutStrategy { top_n, drop_n, only_tradable, forbid_st }`（构造入口 `new(top_n, drop_n)`：`only_tradable` / `forbid_st` 默认 `false`，builder 方法覆写）：按规范"内置策略"实现排名、卖出、资金分配（毛额口径预期回款、一次性确定金额不重新分配），`Decision.target_positions = Some(top_n)`，买单按 score 降序、同分按 code 升序（字典序确定性），核减使用 trait 默认钩子。排名、同分比较、等权分配、金额→股数换算等通用逻辑实现于 `strategy/common.rs`，供后续新策略复用。无信号日不调仓由引擎保证（§4.8 主循环 a 步），策略无需处理。
 
 `top_n` 与 `drop_n` 为独立参数，不要求相等：`top_n=100, drop_n=50` 即"持有 100 只、每日轮换最差的 50 只"的半仓轮动用法，`n_buy = top_n − 保留持仓数` 公式与两阶段核减天然兼容。构造期校验 `top_n ≥ 1`、`drop_n ≥ 0`；`drop_n > top_n` 不报错但 warning（退化为每日清空排名内持仓再重建，行为确定但通常非预期）。
 
@@ -271,6 +285,8 @@ pub struct Exchange {
     market: DailyMarketStore,     // Backtest::new 时注入；limit_buy/limit_sell 已按 deal_price 预计算
 }
 impl Exchange {
+    /// 构造期校验：deal_price 合法；limit_threshold ∈ (0, 0.1]，越界 Err（InvalidParam）；
+    /// None -> 不做涨跌停限制并 warning（涨跌停的股票也能被买卖）
     pub fn new(deal_price: &str, open_cost: f64, close_cost: f64, min_cost: f64,
                fixed_slippage: f64, min_slippage_ratio: f64,
                volume_threshold: Option<f64>, limit_threshold: Option<f64>) -> Result<Self>;
@@ -288,18 +304,19 @@ impl Exchange {
 4. 成交量裁剪               -> min(|volume|, volume_cap)；当日无量 -> 0
 5. 卖出截断至持仓量（warning）
 6. 滑点                     -> adj_ratio = max(min_slippage_ratio, fixed/price)，按方向调整，不 clamp
-7. 买单资金反解（两 regime，取可行解较大者；用滑点后价格）
+7. 买单资金反解（两 regime，取可行解较大者；用滑点后价格；现金连 min_cost 都不足 -> 0）
 8. 整手取整                 -> 买入 100 股；SH688/SH689 按 1 股取整、不足 200 股归零；卖出不取整
 9. 费用                     -> max(val × ratio, min_cost)；volume = 0 时费用 0
 10. 回填 + account.on_deal
 ```
 
-`rules.rs` 中滑点 / 费用 / 反解 / 取整均为**纯函数**，是单元测试的主要标的。`market.rs` 在注入时预计算 `limit_buy` / `limit_sell`（`pre_close` / `high_limit` / `low_limit` 缺失分支按规范置 false 并 warning），并提供按日 SoA 视图与 `TradableInfo` 构建（Exchange 与 Strategy 共用同一份当日数据，保证口径一致）。
+`rules.rs` 中滑点 / 费用 / 反解 / 取整均为**纯函数**，是单元测试的主要标的。`market.rs` 在注入时预计算 `limit_buy` / `limit_sell`（缺失分支按规范区分：`pre_close` 缺失如上市首日属常态，仅置 false 不告警；`high_limit` / `low_limit` 自身缺失才置 false 并 warning），并提供按日 SoA 视图与 `TradableInfo` 构建（Exchange 与 Strategy 共用同一份当日数据，保证口径一致）。
 
 ### 4.8 Backtest
 
 ```rust
-pub struct Backtest { data: BTData, account: Account, exchange: Exchange, strategy: Box<dyn Strategy> }
+pub struct Backtest { data: BTData, account: Account, exchange: Exchange, strategy: Box<dyn Strategy>,
+                      initial_cash: f64 /* 账户构造时的期初现金；装配 BTResult 时导出（§4.9 报表首日分母） */ }
 impl Backtest {
     pub fn new(data: BTData, account: Account, exchange: Exchange, strategy: Box<dyn Strategy>) -> Self;
     // new 内完成：exchange 注入行情（按 deal_price 预计算 limit 列）
@@ -313,15 +330,18 @@ impl Backtest {
 0. 启动校验：日历区间对齐（Err 规则见规范）；
    信号延期校验（datetime 不在日历 / instrument 无行情 -> 丢弃 + warning）
 1. for day in 对齐区间:
-   a. 取 T−1 日 SignalDay（无 -> None）
+   a. 取 T−1 日 SignalDay；无 -> 本日不产生任何订单（引擎级保证，规范主循环第 1 步），
+      跳过 c~f，仅执行 b 与 g（复权与估值同当日是否交易无关）
    b. account.adjust_factor(day_market)               // 撮合前复权
-   c. decision = strategy.gen_decision(ctx)           // signal=None 时策略应不调仓
-      - Decision 合法性：同股同时买+卖 -> Err；同股多买单合并
+   c. decision = strategy.gen_decision(ctx)           // 仅在 a 取到信号时调用
+      - Decision 合法性：同股同时买+卖 -> Err；同股多笔买单合并为一笔
+        （多笔卖单同理合并，规范仅约定买单，此处对称钉死）
    d. 阶段一：逐单 deal_order(sell)                   // 卖单全部撮合，回款当日可用
+      每笔订单（含 deal_volume = 0 的未成交单）追加到 trades 日志
    e. 核减：buy_orders = strategy.revise_buy_orders(decision.buy_orders, post_sell_ctx)
-      // 默认实现按 target_positions 截断；策略可覆写自定义核减语义
+      // 默认实现按 target_positions 截断；被核减丢弃的买单未进入撮合，不产生 trades 行
    f. 阶段二：按序逐单 deal_order(buy)                // 优先级高者优先获得资金
-      每笔成交（含 deal_volume = 0 的未成交单）追加到 trades 日志
+      每笔订单（含 deal_volume = 0 的未成交单）追加到 trades 日志
    g. account.end_of_day(day_market, day)             // 估值 + 逐日记录 + 持仓快照
 2. 装配 BTResult
 ```
@@ -335,12 +355,13 @@ pub struct BTResult {
     trades: Vec<TradeRecord>,
     calendar: TradingCalendar, range: Range<DayIdx>,
     benchmark: DataFrame,               // 多指数原始帧，gen_report 时选定
+    initial_cash: f64,                  // 期初资金：turnover / cost 在区间首个有成交交易日的分母
 }
 impl BTResult {
     pub fn export_hist_position(&self, path: &str) -> Result<()>;  // weight = 市值/当日总资产，导出时计算
     pub fn export_trades(&self, path: &str) -> Result<()>;
     pub fn gen_report(&self, benchmark: &str, excess_method: &str) -> Result<Report>;
-    pub fn gen_report_default(&self) -> Result<Report>;
+    pub fn gen_report_default(&self) -> Result<Report>; // = gen_report("zz1000", "arithmetic")
 }
 
 pub struct Report { metrics: DataFrame /* export_data 逐 bar 表 */, derived: DerivedStats }
@@ -352,6 +373,8 @@ impl Report {
 
 `gen_report` 流程：基准名 → 映射表（不在表内 Err）→ 过滤该指数、剔除日历外行 → **覆盖校验**（必须覆盖回测全部交易日，否则 Err）→ 与逐日记录 join → 计算 `return` / `turnover` / `cost` 等逐 bar 列（polars 向量化）→ 含/不含成本两条收益序列派生超额与累计净值 → 衍生指标（年化、波动、夏普、最大回撤、信息比率，ddof = 0）。导出边界完成 `code` → `instrument` 反映射与 `YYYY-MM-DD` 日期格式化。
 
+首日口径（规范"指标定义--补充定义"）：`r_0 = 0` -- 首日盈亏（含首日费用）不进入收益率与净值序列（净值期初恒为 1），仅体现在 `account` 列，并通过 `V_0` 的水平影响后续收益率分母；`excess_0 = −b_0` 不做特殊处理；年化公式中的 `n` 为区间交易日数（含首日）。`turnover` / `cost` 的分母为前一交易日总资产，区间首个有成交的交易日无前日，取期初资金 `initial_cash`。
+
 ---
 
 ## 5. 关键设计决策
@@ -359,7 +382,7 @@ impl Report {
 | # | 决策 | 理由 |
 | --- | --- | --- |
 | D1 | 单 crate 多模块，不拆 workspace | 当前规模单 crate 编译更快、依赖简单；模块边界按 crate 标准设计，未来可平移 |
-| D2 | 双层数据表示：polars 做 IO/校验/报表，主循环用按日 SoA 切片 | 规范性能目标（5000 股 × 6 年分钟级）。逐行 DataFrame 访问开销大；加载后一次转换为 `day_offsets` 索引的列式 Vec，主循环零拷贝切片 |
+| D2 | 双层数据表示：polars 做 IO/校验/报表，主循环用按日 SoA 切片 | 规范性能目标（5000 股 × 6 年日频数据，单次回测分钟级完成）。逐行 DataFrame 访问开销大；加载后一次转换为 `day_offsets` 索引的列式 Vec，主循环零拷贝切片 |
 | D3 | `Decision` 拆 sell/buy 两组；核减编排为 `Strategy::revise_buy_orders` 钩子（默认按 `target_positions` 截断） | 核减规则（top_n − 实际持仓）是策略知识，但两阶段编排（先卖、核减、后买）在 Backtest。钩子方案使 Backtest 无需 downcast 具体策略，也不把 TopkDropout 语义硬编码进编排层：TopkDropout 用默认实现零成本，新策略覆写钩子即可获得卖出成交结果并实现自定义核减（如按实际回款重新分配金额） |
 | D4 | 信息边界编译期化：`Signal` 结构上无 `ret` 列；策略只拿到 `StrategyContext` | 防前视不靠注释约束：策略无法引用不存在的字段。`TradableInfo` 与 Exchange 撮合共用同一份当日视图，避免策略与撮合口径分叉 |
 | D5 | 不含成本口径由 `V + 累计费用` 在 Report 层派生 | 规范明确该口径为可接受近似；账户只需逐日记 `cost`，无需双序列记账 |
@@ -379,7 +402,7 @@ impl Report {
 pub enum BtError {
     #[error("数据校验失败: {0}")] Validation(String),        // 重复键、缺列、非法价格/factor
     #[error("交易日历: {0}")] Calendar(String),              // 区间对齐失败
-    #[error("非法参数: {0}")] InvalidParam(String),          // deal_price / benchmark / excess_method
+    #[error("非法参数: {0}")] InvalidParam(String),          // deal_price / benchmark / excess_method / limit_threshold 越界
     #[error("基准覆盖不足: {0}")] BenchmarkCoverage(String), // gen_report 覆盖校验
     #[error("决策非法: {0}")] InvalidDecision(String),       // 同股买卖冲突等
     #[error(transparent)] Polars(#[from] polars::error::PolarsError),
@@ -411,7 +434,7 @@ pub enum BtError {
 对应规范"测试与验收"三层：
 
 1. **单元测试**（模块内 `#[cfg(test)]`）：`rules.rs` 纯函数全覆盖——limit 判定（含 5%/10%/20% 板幅与容差比例）、滑点两 regime、min_cost 反解两 regime 与边界、整手（100 股 / SH688 / SH689 / 卖出零股）；`position.rs` 的 factor 调整（当日新买入不调整、停牌恢复补调、epsilon 比较）；`types.rs` 编解码往返。
-2. **合成用例精确验收**（`tests/acceptance/` + `tests/data/synthetic/`）：3~5 只股票、约 10 个交易日、价格取整数/有限小数的手算用例，覆盖规范清单（涨跌停拦截、停牌、除权、退市估值沿用、min_cost 触发、整手不足一手、资金反解、两阶段核减）。断言逐笔成交明细与逐日 account/value/cash **完全相等**，外加不变量（持仓 ≤ top_n、卖出截断、T+1）。每个用例同时附带手算预期值文件，作为正确性基准。
+2. **合成用例精确验收**（`tests/acceptance/` + `tests/data/synthetic/`）：3~5 只股票、约 10 个交易日、价格取整数/有限小数的手算用例，覆盖规范清单（涨跌停拦截、停牌、除权、退市估值沿用、min_cost 触发、整手不足一手、资金反解、两阶段核减、期初建仓（空仓首日买入 top_n）、deal_price 列无效（缺失/NaN/≤0）不可交易--后两项为规范单测清单中的引擎级行为，以合成用例覆盖）。断言逐笔成交明细与逐日 account/value/cash **完全相等**，外加不变量（持仓 ≤ top_n、卖出截断、T+1）。每个用例同时附带手算预期值文件，作为正确性基准。
 3. **端到端冒烟**（`tests/smoke_tmp_data.rs`）：检测 `tmp_data/` 存在才运行（否则跳过），全区间跑通无 panic，校验三个输出文件的列名与日期格式；**不做数值对拍**（tmp_data 仅格式参考）。
 
 ---

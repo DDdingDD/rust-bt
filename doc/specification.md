@@ -52,7 +52,7 @@ fn main() -> anyhow::Result<()> {
         min_slippage_ratio,
         volume_threshold,
         limit_threshold,
-    );
+    )?;
     let strategy: Box<dyn Strategy> = Box::new(TopkDropoutStrategy::new(top_n, drop_n));
 
     // 7. 运行回测
