@@ -1,8 +1,9 @@
 //! Report（报告，架构 §4.9）：逐 bar 指标、衍生指标、export_data 与绘图。
 
-pub mod plot;
+mod html;
 
 use std::fs::File;
+use std::io::Write;
 
 use chrono::NaiveDate;
 use polars::prelude::*;
@@ -47,12 +48,24 @@ pub struct Report {
     dates: Vec<NaiveDate>,
     /// 累计净值（含成本，期初 1）
     cum_with_cost: Vec<f64>,
+    /// 累计净值（不含成本口径，V' = V + 累计费用 近似）
+    cum_without_cost: Vec<f64>,
     /// 基准累计净值（期初 1）
     cum_benchmark: Vec<f64>,
-    /// 回撤序列（含成本净值）
+    /// 回撤序列（含成本净值，正值）
     drawdown: Vec<f64>,
+    /// 回撤序列（不含成本净值，正值）
+    drawdown_without: Vec<f64>,
     /// 累计超额净值（含成本口径超额复利）
     cum_excess: Vec<f64>,
+    /// 累计超额净值（不含成本口径超额复利）
+    cum_excess_without: Vec<f64>,
+    /// 超额净值回撤（含成本口径，正值）
+    excess_drawdown: Vec<f64>,
+    /// 超额净值回撤（不含成本口径，正值）
+    excess_drawdown_without: Vec<f64>,
+    /// 双边换手率（日度）
+    turnover: Vec<f64>,
 }
 
 impl Report {
@@ -144,9 +157,14 @@ impl Report {
 
         // 绘图序列
         let cum_with_cost = cumprod(&ret);
+        let cum_without_cost = cumprod(&ret_without);
         let cum_benchmark = cumprod(bench);
         let cum_excess = cumprod(&excess_with);
+        let cum_excess_without = cumprod(&excess_without);
         let drawdown = drawdown_of(&cum_with_cost);
+        let drawdown_without = drawdown_of(&cum_without_cost);
+        let excess_drawdown = drawdown_of(&cum_excess);
+        let excess_drawdown_without = drawdown_of(&cum_excess_without);
 
         let derived = DerivedStats {
             annualized_return: annualized(&ret),
@@ -166,7 +184,7 @@ impl Report {
             Series::new("account".into(), account).into(),
             Series::new("return".into(), ret).into(),
             Series::new("total_turnover".into(), total_turnover).into(),
-            Series::new("turnover".into(), turnover).into(),
+            Series::new("turnover".into(), turnover.clone()).into(),
             Series::new("total_cost".into(), total_cost).into(),
             Series::new("cost".into(), cost).into(),
             Series::new("value".into(), value).into(),
@@ -180,9 +198,15 @@ impl Report {
             derived,
             dates,
             cum_with_cost,
+            cum_without_cost,
             cum_benchmark,
             drawdown,
+            drawdown_without,
             cum_excess,
+            cum_excess_without,
+            excess_drawdown,
+            excess_drawdown_without,
+            turnover,
         }
     }
 
@@ -194,16 +218,29 @@ impl Report {
         Ok(())
     }
 
-    /// 绘制净值 / 回撤 / 超额三条曲线，输出 PNG 到指定路径（如 report_plot.png；X 轴为交易日）。
+    /// 绘制交互式报告：顶部衍生指标表 + 7 面板图（累计收益 / 两口径回撤 /
+    /// 累计超额 / 换手率 / 两口径超额回撤），输出自包含 HTML（plotly.js 走 CDN）到指定路径
+    /// （如 report_plot.html；X 轴为交易日，首点补 T0 基准）。
     pub fn plot(&self, path: &str) -> Result<()> {
-        plot::plot_report(
-            path,
-            &self.dates,
-            &self.cum_with_cost,
-            &self.cum_benchmark,
-            &self.drawdown,
-            &self.cum_excess,
-        )
+        if self.dates.is_empty() {
+            return Err(crate::error::BtError::Validation("无回测数据，无法绘图".into()));
+        }
+        let curves = html::ReportCurves {
+            dates: &self.dates,
+            cum_bench: &self.cum_benchmark,
+            cum_wo_cost: &self.cum_without_cost,
+            cum_w_cost: &self.cum_with_cost,
+            mdd_wo_cost: &self.drawdown_without,
+            mdd_w_cost: &self.drawdown,
+            cum_ex_wo_cost: &self.cum_excess_without,
+            cum_ex_w_cost: &self.cum_excess,
+            turnover: &self.turnover,
+            ex_mdd_w_cost: &self.excess_drawdown,
+            ex_mdd_wo_cost: &self.excess_drawdown_without,
+        };
+        let mut file = File::create(path)?;
+        file.write_all(html::render_html(&curves, &self.derived).as_bytes())?;
+        Ok(())
     }
 }
 

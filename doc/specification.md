@@ -65,7 +65,7 @@ fn main() -> anyhow::Result<()> {
     bt_result.export_trades("output/trades.csv")?;
     let report = bt_result.gen_report("zz1000", "arithmetic")?;
     report.export_data("output/report_data.csv")?;
-    report.plot("output/report_plot.png")?;
+    report.plot("output/report_plot.html")?;
 
     Ok(())
 }
@@ -104,10 +104,15 @@ impl BTResult {
     fn elapsed(&self) -> std::time::Duration; // run() 墙钟耗时（不含 BTData 加载），进度条关闭时同样记录
 }
 
-// 报告：export_data 输出逐 bar 原始指标；plot 绘制净值/回撤/超额曲线并输出 PNG
+// 报告：export_data 输出逐 bar 原始指标；plot 输出 交互式 HTML 报告
 impl Report {
     fn export_data(&self, path: &str) -> anyhow::Result<()>;
-    fn plot(&self, path: &str) -> anyhow::Result<()>; // 输出 PNG（如 report_plot.png）：净值 / 回撤 / 超额三条曲线，X 轴为交易日
+    // 输出自包含 HTML（如 report_plot.html，plotly.js basic bundle 内嵌、离线可打开）：顶部衍生指标表
+    // （年化/波动/夏普/最大回撤/超额年化/信息比率，含与不含成本两列口径）+ 7 面板堆叠图：
+    // 累计收益（基准 / 不含成本 / 含成本）、回撤（不含成本）、回撤（含成本）、
+    // 累计超额（不含成本 / 含成本）、换手率、超额回撤（含成本）、超额回撤（不含成本）；
+    // 收益类序列取净值−1、回撤取负值绘制，X 轴为交易日且首点补 T0 基准
+    fn plot(&self, path: &str) -> anyhow::Result<()>;
 }
 ```
 

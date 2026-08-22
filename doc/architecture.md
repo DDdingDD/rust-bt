@@ -75,7 +75,7 @@ rust-bt/
 │   ├── result.rs               # BTResult：hist_position / trades 导出、gen_report
 │   └── report/
 │       ├── mod.rs              # Report：PortfolioMetrics、export_data、衍生指标
-│       └── plot.rs             # plotters 绘图：净值 / 回撤 / 超额 → PNG（路径由调用方指定）
+│       └── html.rs             # HTML 报告：指标表 + 7 面板图（plotly CDN，路径由调用方指定）
 ├── examples/
 │   └── run_backtest.rs         # 与规范"使用方法"一致的端到端示例
 └── tests/
@@ -372,10 +372,10 @@ impl BTResult {
     pub fn elapsed(&self) -> Duration;                   // run() 耗时（元数据，不进导出文件与报表）
 }
 
-pub struct Report { metrics: DataFrame /* export_data 逐 bar 表 */, derived: DerivedStats }
+pub struct Report { metrics: DataFrame /* export_data 逐 bar 表 */, derived: DerivedStats, /* + 绘图序列（含/不含成本净值、回撤、超额、换手率） */ }
 impl Report {
     pub fn export_data(&self, path: &str) -> Result<()>;
-    pub fn plot(&self, path: &str) -> Result<()>;   // plotters -> PNG（调用方指定路径），净值/回撤/超额三子图
+    pub fn plot(&self, path: &str) -> Result<()>;   // HTML（调用方指定路径）：指标表 + 7 面板图，见 D10
 }
 ```
 
@@ -398,7 +398,7 @@ impl Report {
 | D7 | 停牌检查先于涨跌停，且 limit 预计算在行情注入 Exchange 时按 deal_price 完成 | 规范明确判定顺序与预计算时机；注入点（`Backtest::new`）是唯一同时持有行情与 deal_price 参数的位置 |
 | D8 | 撮合规则（滑点/费用/反解/整手/limit 判定）实现为纯函数模块 `rules.rs` | 规范的单元测试清单（涨跌停、min_cost 反解、科创板 200 股、滑点）全部落在纯函数上，可无 fixture 直测 |
 | D9 | warning 统一走 `log` facade | 库不绑定具体 logger；示例/测试用 env_logger 初始化。warning 语义（丢弃信号、缺失按 0、截断卖出）散落在各层，统一通道便于审计 |
-| D10 | 绘图选 plotters | 纯 Rust、无系统依赖、位图 PNG 直出，三子图布局简单；避免 gnuplot/charming 的外部运行时或前端依赖 |
+| D10 | 报告绘图：自包含 HTML（plotly.js basic bundle vendor 于 `assets/`、`include_str!` 内嵌，字符串模板手工拼 JSON）~~（原：plotters 直出 PNG，2026-08 取代）~~ | 交互式报告格式（7 面板：含/不含成本累计收益、两口径回撤、累计超额、换手率、两口径超额回撤 + 衍生指标表），可交互缩放/悬浮取值；手工拼 JSON 零新增 Rust 依赖、无前端构建；渲染为纯函数（`report/html.rs`）可无 fixture 直测。内嵌 basic bundle（仅 scatter/bar/pie，约 1.1MB）使单文件离线可开，代价为仓库/二进制/产物各 +1.1MB |
 | D11 | 错误分层：内部 `thiserror` 类型化 `BtError`，公开 API 返回 `anyhow::Result` | 与规范示例签名（`anyhow::Result`）一致；内部保留错误分类（数据校验/日历/非法参数/撮合）便于测试断言与调用方 downcast |
 | D12 | 进度条与耗时：`with_progress` 开关（默认关闭）+ indicatif 渲染 stderr；耗时记 `BTResult.elapsed`，进度条结束行显示 | 库默认零终端输出（测试、无终端、输出重定向环境干净）；总日数在区间对齐后即知，进度与 ETA 确定；禁用时 `Option<ProgressBar>` 为 None、`Instant` 计时开销可忽略，不触碰主循环热路径（每交易日一次 `inc`，重绘由 indicatif 节流） |
 
@@ -433,7 +433,6 @@ pub enum BtError {
 | chrono | `NaiveDate`，`YYYY-MM-DD` 解析/格式化 |
 | thiserror / anyhow | 错误分层（见 D11） |
 | log | warning 通道（D9） |
-| plotters | 报告 PNG 绘制（D10，路径由调用方指定） |
 | indicatif | 终端进度条：stderr 渲染、按时间节流重绘（D12） |
 | env_logger（dev/example） | 示例与测试的日志初始化 |
 

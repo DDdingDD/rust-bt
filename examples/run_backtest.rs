@@ -57,7 +57,7 @@ fn main() -> anyhow::Result<()> {
     bt_result.export_trades("output/trades.csv")?;
     let report = bt_result.gen_report("zz1000", "arithmetic")?;
     report.export_data("output/report_data.csv")?;
-    report.plot("output/report_plot.png")?;
+    report.plot("output/report_plot.html")?;
 
     println!("回测耗时: {:.2?}", bt_result.elapsed());
     println!("输出产物已写入 output/（hist_position / trades / report_data / report_plot）");

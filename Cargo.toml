@@ -10,7 +10,6 @@ chrono = { version = "0.4", default-features = false, features = ["std", "alloc"
 thiserror = "2"
 anyhow = "1"
 log = "0.4"
-plotters = "0.3"
 indicatif = "0.17"
 
 [dev-dependencies]

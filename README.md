@@ -13,7 +13,7 @@ cargo build --release
 cargo run --release --example run_backtest
 ```
 
-输出统一写入 `output/`（已 gitignore）：`hist_position.csv`、`trades.csv`、`report_data.csv`、`report_plot.png`。
+输出统一写入 `output/`（已 gitignore）：`hist_position.csv`、`trades.csv`、`report_data.csv`、`report_plot.html`。
 
 ## 测试
 
