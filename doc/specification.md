@@ -148,6 +148,7 @@ impl Report {
 | stock_bar | `factor` 缺失 / NaN / ≤ 0                          | 报错（复权依赖该列，异常值会静默破坏持仓调整）                    |
 | stock_bar | `paused` / `is_st` 值缺失                            | 按 0 处理并 warning                                       |
 | benchmark | (datetime, instrument) 重复                         | 报错                                                    |
+| benchmark | `benchmark` 值缺失 / NaN / 非有限值（区间外行除外）       | 报错（`gen_report` 阶段校验）                              |
 | pred      | (datetime, instrument) 重复                         | 报错                                                    |
 | pred      | `datetime` 不在交易日历中                                | 该条信号丢弃并 warning                                       |
 | pred      | `score` 为 NaN / 缺失                                | 该条信号丢弃并 warning                                       |
@@ -461,7 +462,7 @@ cost_price /= factor_ratio                  // 除权导致成本价降低
 
 - 股票：固定 8 位，交易所前缀 + 6 位数字，`SH` 表示上海证券交易所，`SZ` 表示深圳证券交易所，如 `SH600000`、`SZ000006`；暂时仅支持上交所与深交所，**不含北交所**（BJ 前缀代码不在支持范围），后续会支持；
 - 指数/基准：代码长度不固定，沿用数据源原始代码（如 `SH000300`、`CSI932000`、`CSIKC`），不参与下述 int 编码转换。
-- **内部 int 编码（效率优化）**：为追求效率，加载后可将股票 `instrument` 转为 int：去掉交易所前缀，取 6 位数字部分的整数值（如 `SH000006` -> 6、`SH600000` -> 600000）。沪市股票数字段为 6xxxxx / 68xxxx，深市为 0xxxxx / 3xxxxx，两市不重叠，int 编码在股票范围内唯一（北交所数字段以 4 / 8 / 9 开头，亦不重叠，后续接入时该编码规则无需变更）；无法按该规则解析的代码按数据校验报错。命名约定：**字符串口径（`SH600000`）沿用 `instrument`，用于 CSV 输入输出与对外接口；int 口径（600000）统一用 `code` 一词**命名相关变量与列名（如 `stock_code`、polars 列 `code`），加载后正向转换、导出前反向映射回字符串。
+- **内部 int 编码（效率优化）**：为追求效率，加载后可将股票 `instrument` 转为 int：去掉交易所前缀，取 6 位数字部分的整数值（如 `SH000006` -> 6、`SH600000` -> 600000）。**前缀与数字段首位必须匹配**：沪市股票数字段为 6xxxxx / 68xxxx，深市为 0xxxxx / 3xxxxx；前缀错配（如 `SZ600000`、`SH000006`）按无法解析处理。两市不重叠，int 编码在股票范围内唯一（北交所数字段以 4 / 8 / 9 开头，亦不重叠，后续接入时该编码规则无需变更）；无法按该规则解析的代码按数据校验报错。命名约定：**字符串口径（`SH600000`）沿用 `instrument`，用于 CSV 输入输出与对外接口；int 口径（600000）统一用 `code` 一词**命名相关变量与列名（如 `stock_code`、polars 列 `code`），加载后正向转换、导出前反向映射回字符串。
 
 基准名称映射（`gen_report` 的参数 → 数据文件中的 instrument）：
 
@@ -498,7 +499,7 @@ cost_price /= factor_ratio                  // 除权导致成本价降低
 | `is_st`      | 是否 ST，1 为 ST                                         |
 | `vwap`       | 成交均价（= `money / volume`），`deal_price = "vwap"` 时使用本列 |
 
-> `avg` 与 `vwap` 数值相同、冗余，后续数据管道可只保留 `vwap`。当前两者都加载，`deal_price = "vwap"` 使用 `vwap` 列。
+> `avg` 与 `vwap` 数值相同、冗余，后续数据管道可只保留 `vwap`。当前仅加载 `vwap`（`avg` 冗余，加载后无用途，不作为必需列，也不做校验）。
 
 ### benchmark.csv —— 基准收益
 
@@ -538,7 +539,7 @@ cost_price /= factor_ratio                  // 除权导致成本价降低
 
 ### trades.csv —— 成交记录输出
 
-`export_trades` 的输出格式，逐订单一行（含未成交订单，`deal_volume = 0`）：
+`export_trades` 的输出格式，逐订单一行（含未成交订单，`deal_volume = 0`）。**被核减丢弃的买单（未进入撮合阶段）不产生行**：
 
 | 字段            | 含义                  |
 | ------------- | ------------------- |

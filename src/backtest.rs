@@ -181,13 +181,8 @@ impl Backtest {
             }
         }
 
-        // ---- 2. 装配 BTResult ----
-        let elapsed = timer.elapsed();
-        if let Some(bar) = pb {
-            bar.finish_with_message(format!("完成，总耗时 {elapsed:.2?}"));
-        }
-
-        Ok(BTResult::assemble(
+        // ---- 2. 装配 BTResult（calendar 克隆等收尾计入 elapsed）----
+        let mut result = BTResult::assemble(
             self.account.take_daily(),
             self.account.take_hist_positions(),
             trades,
@@ -195,8 +190,14 @@ impl Backtest {
             range,
             self.benchmark.take(),
             self.initial_cash,
-            elapsed,
-        ))
+        );
+        let elapsed = timer.elapsed();
+        result.set_elapsed(elapsed);
+        if let Some(bar) = pb {
+            bar.finish_with_message(format!("完成，总耗时 {elapsed:.2?}"));
+        }
+
+        Ok(result)
     }
 
 }

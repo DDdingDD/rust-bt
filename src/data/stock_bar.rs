@@ -16,7 +16,7 @@ use crate::data::calendar::{parse_date, TradingCalendar};
 use crate::error::{BtError, Result};
 use crate::types::{parse_instrument, Code, DayIdx};
 
-/// stock_bar 必需列（`avg` 与 `vwap` 冗余，存在则加载但不强制要求）。
+/// stock_bar 必需列（`avg` 与 `vwap` 冗余，当前仅加载 `vwap`，`avg` 不作必需列、也不加载）。
 pub const REQUIRED_COLUMNS: &[&str] = &[
     "datetime",
     "instrument",

@@ -115,19 +115,26 @@ impl BenchmarkName {
     }
 }
 
-/// `instrument` -> `code`：`SH600000` -> 600000。仅接受 SH/SZ 前缀 + 6 位数字
-/// （北交所 BJ 前缀不在支持范围）。无法解析按数据校验报错。
+/// `instrument` -> `code`：`SH600000` -> 600000。仅接受 SH/SZ 前缀 + 6 位数字，
+/// 且前缀与数字段首位必须匹配：沪市为 6xxxxx / 68xxxx，深市为 0xxxxx / 3xxxxx
+/// （北交所 BJ 前缀及 4/8/9 开头数字段不在支持范围）。无法解析按数据校验报错。
 pub fn parse_instrument(s: &str) -> Result<Code> {
     let bytes = s.as_bytes();
-    if bytes.len() == 8 && (&bytes[..2] == b"SH" || &bytes[..2] == b"SZ") && bytes[2..].iter().all(u8::is_ascii_digit) {
-        // 6 位数字范围内解析不会溢出 u32
+    if bytes.len() == 8 && bytes[2..].iter().all(u8::is_ascii_digit) {
         let code: Code = s[2..].parse().map_err(|_| {
             BtError::Validation(format!("instrument 数字段解析失败: {s}"))
         })?;
-        return Ok(code);
+        let first_digit_ok = match &bytes[..2] {
+            b"SH" => bytes[2] == b'6',
+            b"SZ" => bytes[2] == b'0' || bytes[2] == b'3',
+            _ => false,
+        };
+        if first_digit_ok {
+            return Ok(code);
+        }
     }
     Err(BtError::Validation(format!(
-        "instrument 须为 SH/SZ 前缀 + 6 位数字，收到: {s}"
+        "instrument 须为 SH/SZ 前缀 + 匹配的 6 位数字段（沪市 6 开头、深市 0/3 开头），收到: {s}"
     )))
 }
 
@@ -248,6 +255,9 @@ mod tests {
         assert!(parse_instrument("600000").is_err()); // 无前缀
         assert!(parse_instrument("SH60000A").is_err()); // 非数字
         assert!(parse_instrument("CSI932000").is_err()); // 指数代码不按股票编码
+        assert!(parse_instrument("SZ600000").is_err()); // 前缀与数字段不匹配：沪市代码不能以 6 开头
+        assert!(parse_instrument("SH000006").is_err()); // 深市代码不能以 SH 前缀
+        assert!(parse_instrument("SH300750").is_err()); // 深市创业板代码不能以 SH 前缀
         assert!(format_instrument(430_047).is_err()); // 4 开头北交所段
         assert!(format_instrument(920_001).is_err()); // 9 开头
     }

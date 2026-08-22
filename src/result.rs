@@ -35,7 +35,6 @@ impl BTResult {
         range: Range<DayIdx>,
         benchmark: Option<BenchmarkStore>,
         initial_cash: f64,
-        elapsed: Duration,
     ) -> Self {
         Self {
             daily,
@@ -45,7 +44,7 @@ impl BTResult {
             range,
             benchmark,
             initial_cash,
-            elapsed,
+            elapsed: Duration::ZERO,
         }
     }
 
@@ -67,6 +66,10 @@ impl BTResult {
     /// run() 墙钟耗时（进度条关闭时同样记录）。
     pub fn elapsed(&self) -> Duration {
         self.elapsed
+    }
+
+    pub(crate) fn set_elapsed(&mut self, elapsed: Duration) {
+        self.elapsed = elapsed;
     }
 
     fn fmt_date(&self, day: DayIdx) -> String {
@@ -164,12 +167,20 @@ impl BTResult {
         })?;
         let series = store.series_for(name.instrument());
 
-        // 覆盖校验：基准必须覆盖回测区间全部交易日（日历外行天然不参与）
+        // 覆盖校验：基准必须覆盖回测区间全部交易日（日历外行天然不参与）；
+        // 区间内交易日的 benchmark 值须有限（缺失/NaN/inf 按数据校验报错）。
         let mut bench_returns = Vec::with_capacity(self.range.len());
         for day in self.range.clone() {
             let date = self.calendar.date(day);
             match series.get(&date) {
-                Some(v) => bench_returns.push(*v),
+                Some(v) if v.is_finite() => bench_returns.push(*v),
+                Some(v) => {
+                    return Err(BtError::Validation(format!(
+                        "基准 {}（{}）在交易日 {date} 的 benchmark 值非法（缺失/NaN/inf）：{v}",
+                        benchmark,
+                        name.instrument()
+                    )))
+                }
                 None => {
                     return Err(BtError::BenchmarkCoverage(format!(
                         "基准 {}（{}）缺失交易日 {date} 的数据",

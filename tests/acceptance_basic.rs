@@ -155,6 +155,28 @@ fn report_errors() {
     };
     let r2 = run_bt(&dir2, &params2);
     assert!(r2.gen_report("zz1000", "arithmetic").is_err());
+
+    // 基准值缺失/NaN -> Err（2026-01-09 空值经加载后变为 NaN）
+    let dir3 = TempDir::new().unwrap();
+    let (d3_dir, _) = setup(false);
+    std::fs::copy(
+        d3_dir.path().join("stock_bar.csv"),
+        dir3.path().join("stock_bar.csv"),
+    )
+    .unwrap();
+    std::fs::copy(d3_dir.path().join("pred.csv"), dir3.path().join("pred.csv")).unwrap();
+    let mut bench_nan = String::from("datetime,instrument,benchmark\n");
+    for d in &D[..4] {
+        bench_nan.push_str(&format!("{d},SH000852,0.001\n"));
+    }
+    bench_nan.push_str("2026-01-09,SH000852,\n"); // 空值 -> NaN
+    std::fs::write(dir3.path().join("benchmark.csv"), bench_nan).unwrap();
+    let params3 = Params {
+        with_benchmark: true,
+        ..Default::default()
+    };
+    let r3 = run_bt(&dir3, &params3);
+    assert!(r3.gen_report("zz1000", "arithmetic").is_err());
 }
 
 #[test]
