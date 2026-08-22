@@ -71,7 +71,7 @@ rust-bt/
 │   │   ├── mod.rs              # Strategy trait、StrategyContext、PostSellContext
 │   │   ├── common.rs           # 可复用构件：排名（同分字典序）、等权资金分配、金额->股数换算
 │   │   └── topk_dropout.rs     # TopkDropoutStrategy
-│   ├── backtest.rs             # Backtest：主循环、两阶段撮合编排、延期校验
+│   ├── backtest.rs             # Backtest：主循环、两阶段撮合编排、延期校验、进度条与耗时
 │   ├── result.rs               # BTResult：hist_position / trades 导出、gen_report
 │   └── report/
 │       ├── mod.rs              # Report：PortfolioMetrics、export_data、衍生指标
@@ -316,10 +316,14 @@ impl Exchange {
 
 ```rust
 pub struct Backtest { data: BTData, account: Account, exchange: Exchange, strategy: Box<dyn Strategy>,
-                      initial_cash: f64 /* 账户构造时的期初现金；装配 BTResult 时导出（§4.9 报表首日分母） */ }
+                      initial_cash: f64 /* 账户构造时的期初现金；装配 BTResult 时导出（§4.9 报表首日分母） */,
+                      progress: bool /* 终端进度条开关，默认 false（D12） */ }
 impl Backtest {
     pub fn new(data: BTData, account: Account, exchange: Exchange, strategy: Box<dyn Strategy>) -> Self;
     // new 内完成：exchange 注入行情（按 deal_price 预计算 limit 列）
+    /// 进度条开关（默认关闭）：启用后 run 期间向 stderr 渲染按交易日推进的进度条，
+    /// 总数 = 对齐区间交易日数（启动校验后确定），结束行显示总耗时（D12）
+    pub fn with_progress(self, enabled: bool) -> Self;
     pub fn run(&mut self, signal: &Signal, start_date: &str, end_date: &str) -> Result<BTResult>;
 }
 ```
@@ -329,6 +333,7 @@ impl Backtest {
 ```text
 0. 启动校验：日历区间对齐（Err 规则见规范）；
    信号延期校验（datetime 不在日历 / instrument 无行情 -> 丢弃 + warning）
+   计时与进度：Instant::now() 记起点；progress = true 时创建进度条（stderr，总数 = 区间交易日数）
 1. for day in 对齐区间:
    a. 取 T−1 日 SignalDay；无 -> 本日不产生任何订单（引擎级保证，规范主循环第 1 步），
       跳过 c~f，仅执行 b 与 g（复权与估值同当日是否交易无关）
@@ -343,7 +348,8 @@ impl Backtest {
    f. 阶段二：按序逐单 deal_order(buy)                // 优先级高者优先获得资金
       每笔订单（含 deal_volume = 0 的未成交单）追加到 trades 日志
    g. account.end_of_day(day_market, day)             // 估值 + 逐日记录 + 持仓快照
-2. 装配 BTResult
+   h. progress.inc(1)                                 // 每交易日一次；禁用时为 None 零开销
+2. 装配 BTResult（elapsed = run 全程墙钟耗时；进度条 finish 显示总耗时）
 ```
 
 ### 4.9 BTResult / Report
@@ -356,12 +362,14 @@ pub struct BTResult {
     calendar: TradingCalendar, range: Range<DayIdx>,
     benchmark: DataFrame,               // 多指数原始帧，gen_report 时选定
     initial_cash: f64,                  // 期初资金：turnover / cost 在区间首个有成交交易日的分母
+    elapsed: Duration,                  // run() 墙钟耗时：含启动校验与结果装配，不含 BTData 加载
 }
 impl BTResult {
     pub fn export_hist_position(&self, path: &str) -> Result<()>;  // weight = 市值/当日总资产，导出时计算
     pub fn export_trades(&self, path: &str) -> Result<()>;
     pub fn gen_report(&self, benchmark: &str, excess_method: &str) -> Result<Report>;
     pub fn gen_report_default(&self) -> Result<Report>; // = gen_report("zz1000", "arithmetic")
+    pub fn elapsed(&self) -> Duration;                   // run() 耗时（元数据，不进导出文件与报表）
 }
 
 pub struct Report { metrics: DataFrame /* export_data 逐 bar 表 */, derived: DerivedStats }
@@ -392,6 +400,7 @@ impl Report {
 | D9 | warning 统一走 `log` facade | 库不绑定具体 logger；示例/测试用 env_logger 初始化。warning 语义（丢弃信号、缺失按 0、截断卖出）散落在各层，统一通道便于审计 |
 | D10 | 绘图选 plotters | 纯 Rust、无系统依赖、位图 PNG 直出，三子图布局简单；避免 gnuplot/charming 的外部运行时或前端依赖 |
 | D11 | 错误分层：内部 `thiserror` 类型化 `BtError`，公开 API 返回 `anyhow::Result` | 与规范示例签名（`anyhow::Result`）一致；内部保留错误分类（数据校验/日历/非法参数/撮合）便于测试断言与调用方 downcast |
+| D12 | 进度条与耗时：`with_progress` 开关（默认关闭）+ indicatif 渲染 stderr；耗时记 `BTResult.elapsed`，进度条结束行显示 | 库默认零终端输出（测试、无终端、输出重定向环境干净）；总日数在区间对齐后即知，进度与 ETA 确定；禁用时 `Option<ProgressBar>` 为 None、`Instant` 计时开销可忽略，不触碰主循环热路径（每交易日一次 `inc`，重绘由 indicatif 节流） |
 
 ---
 
@@ -425,6 +434,7 @@ pub enum BtError {
 | thiserror / anyhow | 错误分层（见 D11） |
 | log | warning 通道（D9） |
 | plotters | report_plot.png（D10） |
+| indicatif | 终端进度条：stderr 渲染、按时间节流重绘（D12） |
 | env_logger（dev/example） | 示例与测试的日志初始化 |
 
 ---
@@ -434,7 +444,7 @@ pub enum BtError {
 对应规范"测试与验收"三层：
 
 1. **单元测试**（模块内 `#[cfg(test)]`）：`rules.rs` 纯函数全覆盖——limit 判定（含 5%/10%/20% 板幅与容差比例）、滑点两 regime、min_cost 反解两 regime 与边界、整手（100 股 / SH688 / SH689 / 卖出零股）；`position.rs` 的 factor 调整（当日新买入不调整、停牌恢复补调、epsilon 比较）；`types.rs` 编解码往返。
-2. **合成用例精确验收**（`tests/acceptance/` + `tests/data/synthetic/`）：3~5 只股票、约 10 个交易日、价格取整数/有限小数的手算用例，覆盖规范清单（涨跌停拦截、停牌、除权、退市估值沿用、min_cost 触发、整手不足一手、资金反解、两阶段核减、期初建仓（空仓首日买入 top_n）、deal_price 列无效（缺失/NaN/≤0）不可交易--后两项为规范单测清单中的引擎级行为，以合成用例覆盖）。断言逐笔成交明细与逐日 account/value/cash **完全相等**，外加不变量（持仓 ≤ top_n、卖出截断、T+1）。每个用例同时附带手算预期值文件，作为正确性基准。
+2. **合成用例精确验收**（`tests/acceptance/` + `tests/data/synthetic/`）：3~5 只股票、约 10 个交易日、价格取整数/有限小数的手算用例，覆盖规范清单（涨跌停拦截、停牌、除权、退市估值沿用、min_cost 触发、整手不足一手、资金反解、两阶段核减、期初建仓（空仓首日买入 top_n）、deal_price 列无效（缺失/NaN/≤0）不可交易--后两项为规范单测清单中的引擎级行为，以合成用例覆盖）。断言逐笔成交明细与逐日 account/value/cash **完全相等**，外加不变量（持仓 ≤ top_n、卖出截断、T+1、进度条开关不改变 daily/trades 输出）。每个用例同时附带手算预期值文件，作为正确性基准。
 3. **端到端冒烟**（`tests/smoke_tmp_data.rs`）：检测 `tmp_data/` 存在才运行（否则跳过），全区间跑通无 panic，校验三个输出文件的列名与日期格式；**不做数值对拍**（tmp_data 仅格式参考）。
 
 ---
@@ -446,6 +456,7 @@ pub enum BtError {
 - 主循环内无 polars 逐行访问、无字符串操作、无日期解析；逐日堆分配通过 `Vec::with_capacity` 与复用缓冲控制。
 - 批量计算（limit 预计算、校验、报表指标、导出反映射）全部走 polars 表达式/向量化，避免 for 循环（规范"非功能需求"）。
 - 预期量级：5000 股 × 约 1500 交易日 ≈ 750 万行情行，主循环每行 O(1) 哈希查找；分钟级可达，无需并行化回测主循环（polars 内部已并行处理批量阶段）。
+- 进度与计时零侵入：进度条禁用时 `Option<ProgressBar>` 为 None 无渲染开销；启用时每交易日一次 `inc(1)`，重绘由 indicatif 按时间节流；`Instant` 计时一次一读，开销可忽略。
 
 ---
 
@@ -467,6 +478,6 @@ pub enum BtError {
 2. `signal` + `position` + `account`（含 factor 调整、估值）——领域核心；
 3. `exchange/rules` 纯函数 + 单元测试——撮合规则先行固化；
 4. `exchange/market` + `deal_order` 流水线；
-5. `strategy/common` + `strategy/topk_dropout` + `backtest` 主循环（含核减钩子）；
+5. `strategy/common` + `strategy/topk_dropout` + `backtest` 主循环（含核减钩子、进度条与耗时）；
 6. `result` / `report`（指标、导出、plot）；
 7. 合成验收用例 → tmp_data 冒烟 → 性能验证。

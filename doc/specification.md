@@ -55,8 +55,9 @@ fn main() -> anyhow::Result<()> {
     )?;
     let strategy: Box<dyn Strategy> = Box::new(TopkDropoutStrategy::new(top_n, drop_n));
 
-    // 7. 运行回测
-    let mut backtest = Backtest::new(data, account, exchange, strategy);
+    // 7. 运行回测（with_progress 启用终端进度条，默认关闭）
+    let mut backtest = Backtest::new(data, account, exchange, strategy)
+        .with_progress(true);
     let bt_result = backtest.run(&signal, start_date, end_date)?;
 
     // 8. 输出结果
@@ -89,12 +90,18 @@ impl BTData {
     fn build(self) -> anyhow::Result<BTData>;
 }
 
+// 回测执行器：终端进度条开关（默认关闭；行为见"核心概念--Backtest"）
+impl Backtest {
+    fn with_progress(self, enabled: bool) -> Self;
+}
+
 // 回测结果：逐日账户快照 + 持仓历史 + 成交记录
 impl BTResult {
     fn export_hist_position(&self, path: &str) -> anyhow::Result<()>;
     fn export_trades(&self, path: &str) -> anyhow::Result<()>;
     fn gen_report(&self, benchmark: &str, excess_method: &str) -> anyhow::Result<Report>;
     fn gen_report_default(&self) -> anyhow::Result<Report>; // 等价于 gen_report("zz1000", "arithmetic")
+    fn elapsed(&self) -> std::time::Duration; // run() 墙钟耗时（不含 BTData 加载），进度条关闭时同样记录
 }
 
 // 报告：export_data 输出逐 bar 原始指标；plot 绘制净值/回撤/超额曲线并输出 PNG
@@ -199,6 +206,12 @@ gen_decision(signal, position, cash, tradable_info) -> Decision
 1. 调用策略生成 Decision；
 2. 把 Decision 中的 Order 交给 Exchange 撮合；
 3. 每个 bar 结束时触发账户记账与指标记录。
+
+进度与耗时：
+
+- `with_progress(true)` 启用终端进度条，默认关闭（库默认零终端输出，测试与输出重定向环境干净）；渲染到 **stderr**，不污染 stdout；按交易日推进，总日数 = 对齐区间交易日数（`run` 启动校验后即知，进度与 ETA 确定），结束行显示总耗时。
+- 无论开关与否，`run()` 的墙钟耗时（含启动校验与结果装配，**不含 BTData 加载**）都记入 `BTResult::elapsed()`；数据加载阶段的耗时如需统计，由调用侧在 `BTData` 构建前后自行计时。
+- 进度条只读不写回测状态：开关与否不改变逐日账户序列与成交记录（验收不变量之一）。
 
 ### Exchange（交易所）
 
@@ -605,7 +618,7 @@ IC / RankIC 分析属于离线信号评估，利用 `pred.csv` 的 `ret` 列。�
 - **合成用例精确验收（正确性基准）**：构造可手算的短用例（3~5 只股票、约 10 个交易日的小型 `stock_bar` / `pred` / `benchmark`），价格取整数或有限小数以消除浮点歧义，覆盖：涨跌停拦截、停牌、除权（factor 变化）、退市（行情终止）估值沿用、min_cost 触发、整手取整不足一手、资金约束反解、两阶段撮合核减买单。断言：
   - 逐笔成交明细（标的、方向、数量、成交价、费用）与手算值**完全一致**（经 `export_trades` 输出核对）；
   - 逐日账户序列（account / value / cash）与手算值**完全一致**；
-  - 不变量：正常流程持仓只数 ≤ `top_n`；卖出委托量截断至持仓量；当日买入不可当日卖出（T+1）。
+  - 不变量：正常流程持仓只数 ≤ `top_n`；卖出委托量截断至持仓量；当日买入不可当日卖出（T+1）；进度条开关不改变逐日账户序列与成交记录（`elapsed` 除外）。
 - **端到端冒烟测试**：用仓库内数据（`tmp_data/`，**仅作格式与规模参考**）跑通完整回测：全区间无报错、无 panic，三个输出文件（hist_position / trades / report_data）的列名与日期格式（`YYYY-MM-DD`）符合"数据文件格式"约定。**不做数值对拍**：仓库内 `report_data.csv` / `hist_position.csv` 不作为正确性基准。
 - 若后续提供权威参考输出（真实数据 + 完整参数表），可追加大规模回归：逐日总资产相对误差 ≤ 1e-6（容忍浮点累乘顺序差异），成交价绝对误差 ≤ 1e-9，逐笔数量完全一致。
 
