@@ -4,6 +4,10 @@ version = "0.1.0"
 edition = "2021"
 description = "A 股日频回测系统（依据 doc/specification.md 与 doc/architecture.md 实现）"
 
+[[bin]]
+name = "bt"
+path = "src/bin/bt.rs"
+
 [dependencies]
 polars = { version = "0.44", default-features = false, features = ["csv"] }
 chrono = { version = "0.4", default-features = false, features = ["std", "alloc"] }
@@ -11,7 +15,9 @@ thiserror = "2"
 anyhow = "1"
 log = "0.4"
 indicatif = "0.17"
+env_logger = "0.11"
+serde = { version = "1", features = ["derive"] }
+serde_yaml = "0.9"
 
 [dev-dependencies]
-env_logger = "0.11"
 tempfile = "3"

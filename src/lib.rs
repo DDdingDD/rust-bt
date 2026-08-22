@@ -5,6 +5,7 @@
 
 pub mod account;
 pub mod backtest;
+pub mod config;
 pub mod data;
 pub mod error;
 pub mod exchange;
@@ -18,6 +19,7 @@ pub mod types;
 
 pub use account::{Account, DailyRecord, HistPositionRow};
 pub use backtest::Backtest;
+pub use config::BtConfig;
 pub use data::BTData;
 pub use error::{BtError, Result};
 pub use exchange::Exchange;

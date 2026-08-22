@@ -71,6 +71,20 @@ fn main() -> anyhow::Result<()> {
 }
 ```
 
+### 命令行运行（bt CLI）
+
+除上述代码方式外，也可以用 YAML 配置文件驱动同一条流程（行为与示例完全等价）：
+
+```bash
+bt config.yml          # 或 cargo run --release --bin bt -- config.yml
+```
+
+- 参数仅一个位置参数：配置文件路径；缺省打印用法并以退出码 2 退出。
+- 完整字段与默认值见仓库根目录 `config.example.yml`（带注释）。**必填**仅数据路径（`data.signal` / `data.stock_bar` / `data.benchmark`）与回测区间（`period.start_date` / `period.end_date`）；其余字段省略时取默认值（即上文示例代码中的取值：1000 万资金、top_n=drop_n=100、open 成交、万 1.5/万 6.5 费率等）。
+- `exchange.volume_threshold` / `exchange.limit_threshold` 写 `null` 表示不限制。
+- 报错：必填字段缺失时报错并指明字段名；`strategy.name` 目前仅接受 `topk_dropout`，其他值报错。
+- 输出：`output.dir` 目录（默认 `output/`，自动创建）下生成 hist_position / trades / report_data / report_plot 四个产物，文件名可配置。
+
 ---
 
 ## 接口概要

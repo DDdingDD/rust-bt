@@ -1,0 +1,54 @@
+# bt CLI 回测配置示例：`bt config.yml`
+#
+# 必填：data.*（数据路径）与 period.*（回测区间）。
+# 其余字段均可省略，默认值即本文件中所示（对齐 examples/run_backtest.rs）。
+
+# 数据路径（必填）
+data:
+  signal: "tmp_data/pred.csv"        # 信号 CSV
+  stock_bar: "tmp_data/stock_bar.csv" # 股票日行情 CSV
+  benchmark: "tmp_data/benchmark.csv" # 基准收益 CSV
+
+# 回测区间（必填）：闭开区间 [start_date, end_date)，自动按交易日历对齐
+period:
+  start_date: "2026-01-01"
+  end_date: "2026-06-01"
+
+# 账户
+account:
+  initial_cash: 10000000.0           # 期初资金（1000 万）
+
+# 策略（当前仅支持 topk_dropout）
+strategy:
+  name: "topk_dropout"
+  top_n: 100                         # 目标持仓只数
+  drop_n: 100                        # 每个调仓日计划卖出的只数
+  only_tradable: false               # 仅买入当日可交易的股票
+  forbid_st: false                   # 禁止买入 ST 股
+
+# 交易所（撮合与成本）
+exchange:
+  deal_price: "open"                 # 成交价：open / close / vwap
+  open_cost: 0.00015                 # 买入费率（万 1.5）
+  close_cost: 0.00065                # 卖出费率（佣金 + 印花税，万 6.5）
+  min_cost: 5.0                      # 单笔最低费用
+  fixed_slippage: 0.01               # 固定滑点
+  min_slippage_ratio: 0.0014         # 最小滑点比例
+  volume_threshold: 0.5              # 成交量限制比例（null 表示不限制）
+  limit_threshold: 0.0985            # 涨跌停判定阈值（null 表示不限制）
+
+# 报告
+report:
+  benchmark: "zz1000"                # 基准名称
+  excess_method: "arithmetic"        # 超额计算：arithmetic / geometric
+
+# 输出产物
+output:
+  dir: "output"                      # 输出目录（不存在时自动创建）
+  hist_position: "hist_position.csv" # 逐日持仓快照
+  trades: "trades.csv"               # 成交记录（含未成交）
+  report_data: "report_data.csv"     # 逐 bar 原始指标
+  report_plot: "report_plot.html"    # 交互式 HTML 报告
+
+# 终端进度条
+progress: true

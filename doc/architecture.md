@@ -20,10 +20,13 @@
 
 ```text
 ┌─────────────────────────────────────────────┐
+│ src/bin/bt.rs（CLI：bt <config.yml>）        │
 │ examples/run_backtest.rs（规范"使用方法"示例） │
 ├─────────────────────────────────────────────┤
 │ Facade：load_signal / BTData / Backtest /    │
 │         BTResult / Report（规范公开接口）      │
+│ config：BtConfig（YAML 反序列化 + 默认值 +    │
+│         必填校验，供 CLI 组装上述 Facade）     │
 ├──────────────┬──────────────┬───────────────┤
 │ 编排层        │ 领域层        │ 报表层         │
 │ backtest     │ strategy      │ report        │
@@ -73,9 +76,13 @@ rust-bt/
 │   │   └── topk_dropout.rs     # TopkDropoutStrategy
 │   ├── backtest.rs             # Backtest：主循环、两阶段撮合编排、延期校验、进度条与耗时
 │   ├── result.rs               # BTResult：hist_position / trades 导出、gen_report
+│   ├── config.rs               # BtConfig：YAML 配置（serde 默认值 + 必填校验），供 CLI 使用
+│   ├── bin/
+│   │   └── bt.rs               # CLI 入口（bt <config.yml>）：加载配置、组装 Facade、运行并导出
 │   └── report/
 │       ├── mod.rs              # Report：PortfolioMetrics、export_data、衍生指标
 │       └── html.rs             # HTML 报告：指标表 + 7 面板图（plotly CDN，路径由调用方指定）
+├── config.example.yml          # CLI 配置示例（全字段注释，默认值与 config.rs 一致）
 ├── examples/
 │   └── run_backtest.rs         # 与规范"使用方法"一致的端到端示例
 └── tests/
@@ -434,7 +441,8 @@ pub enum BtError {
 | thiserror / anyhow | 错误分层（见 D11） |
 | log | warning 通道（D9） |
 | indicatif | 终端进度条：stderr 渲染、按时间节流重绘（D12） |
-| env_logger（dev/example） | 示例与测试的日志初始化 |
+| env_logger | CLI 与示例/测试的日志初始化 |
+| serde / serde_yaml | `config.rs` 的 YAML 配置反序列化（bt CLI） |
 
 ---
 

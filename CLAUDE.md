@@ -10,6 +10,7 @@ Rust 股票回测系统（A 股日频，暂仅上交所/深交所）。**行为�
 
 ```bash
 cargo build --release                               # 构建
+cargo run --release --bin bt -- config.example.yml   # CLI：YAML 配置驱动回测（参数格式见 config.example.yml）
 cargo run --release --example run_backtest          # 端到端示例（数据读 tmp_data/，输出写 output/，已 gitignore）
 cargo test --lib                                    # 单元测试（rules/types/position/calendar）
 cargo test --test acceptance_basic                  # 跑单个验收测试文件
