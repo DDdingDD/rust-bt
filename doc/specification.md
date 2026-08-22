@@ -5,7 +5,7 @@
 ## 简介
 
 - 开发语言：Rust
-- 目前只支持 A 股市场
+- 目前只支持 A 股市场：暂时仅支持上交所与深交所，不支持北交所（后续会支持）
 - 目前只支持日频回测
 - 使用 polars 处理数据，减少 for 循环
 
@@ -61,9 +61,10 @@ fn main() -> anyhow::Result<()> {
 
     // 8. 输出结果
     bt_result.export_hist_position("hist_position.csv")?;
+    bt_result.export_trades("trades.csv")?;
     let report = bt_result.gen_report("zz1000", "arithmetic")?;
     report.export_data("report_data.csv")?;
-    report.plot();
+    report.plot()?;
 
     Ok(())
 }
@@ -76,7 +77,8 @@ fn main() -> anyhow::Result<()> {
 示例中各入口的签名约定（示意，非完整定义）：
 
 ```rust
-// 信号：加载 pred.csv 并完成校验，ret 列在此剥离（见 Signal 可见性约束）
+// 信号：加载 pred.csv，完成结构校验（(datetime, instrument) 重复、score 缺失/NaN）并剥离 ret 列；
+// 日历/行情相关校验（datetime 不在交易日历、instrument 无行情）依赖交易日历，推迟到 Backtest::run 启动时执行
 fn load_signal(path: &str) -> anyhow::Result<Signal>;
 
 // 数据容器：加载行情与基准，build 时统一校验并构建交易日历
@@ -90,15 +92,19 @@ impl BTData {
 // 回测结果：逐日账户快照 + 持仓历史 + 成交记录
 impl BTResult {
     fn export_hist_position(&self, path: &str) -> anyhow::Result<()>;
+    fn export_trades(&self, path: &str) -> anyhow::Result<()>;
     fn gen_report(&self, benchmark: &str, excess_method: &str) -> anyhow::Result<Report>;
+    fn gen_report_default(&self) -> anyhow::Result<Report>; // 等价于 gen_report("zz1000", "arithmetic")
 }
 
-// 报告：export_data 输出逐 bar 原始指标；plot 绘制净值/回撤/超额曲线（输出形式由实现自定）
+// 报告：export_data 输出逐 bar 原始指标；plot 绘制净值/回撤/超额曲线并输出 PNG
 impl Report {
     fn export_data(&self, path: &str) -> anyhow::Result<()>;
-    fn plot(&self);
+    fn plot(&self) -> anyhow::Result<()>; // 输出 report_plot.png：净值 / 回撤 / 超额三条曲线，X 轴为交易日
 }
 ```
+
+> 字符串枚举参数（`deal_price`、benchmark 名称、`excess_method`）取值非法时一律返回 `Err`，不 panic；实现上建议用枚举类型承载。
 
 ---
 
@@ -120,16 +126,20 @@ impl Report {
 
 ### 数据校验
 
-加载阶段统一校验，违规即报错（除非另行说明）：
+校验分两阶段：`load_*` 阶段做结构校验；pred 的日历/行情相关校验依赖交易日历，推迟到 `Backtest::run` 启动时执行。违规即报错（除非另行说明）：
 
 | 数据        | 规则                                                | 处理                                                    |
 | --------- | ------------------------------------------------- | ----------------------------------------------------- |
 | stock_bar | (datetime, instrument) 重复                         | 报错                                                    |
 | stock_bar | `paused = 1` 或 `close` 缺失                         | 该日该股不可交易（非错误）                                         |
 | stock_bar | 当日 `volume` 缺失或为 0                                | 该日该股不可交易（非错误；无量即无对手盘，**与 `volume_threshold` 是否设置无关**） |
-| stock_bar | `deal_price` 对应价格列缺失 / NaN                        | 该日该股不可交易（非错误；如 `vwap = money / volume` 在无成交日为 NaN）    |
+| stock_bar | `deal_price` 对应价格列缺失 / NaN / ≤ 0             | 该日该股不可交易（非错误；如无成交日 `vwap = money / volume` 无效）  |
 | stock_bar | `pre_close` 缺失（如上市首日）                             | 该股当日跳过涨跌停预计算，`limit_buy`/`limit_sell` 置 false         |
 | stock_bar | `high_limit` / `low_limit` 缺失（非 `pre_close` 缺失引起） | 同上：当日不做涨跌停判定，置 false 并 warning                        |
+| stock_bar | 必需列缺失（约定列不存在）                                  | 报错                                                    |
+| stock_bar | 价格列（open/close/high/low）≤ 0，或 `high < low`，或 `volume < 0` | 报错                                          |
+| stock_bar | `factor` 缺失 / NaN / ≤ 0                          | 报错（复权依赖该列，异常值会静默破坏持仓调整）                    |
+| stock_bar | `paused` / `is_st` 值缺失                            | 按 0 处理并 warning                                       |
 | benchmark | (datetime, instrument) 重复                         | 报错                                                    |
 | pred      | (datetime, instrument) 重复                         | 报错                                                    |
 | pred      | `datetime` 不在交易日历中                                | 该条信号丢弃并 warning                                       |
@@ -158,10 +168,12 @@ gen_decision(signal, position, cash, tradable_info) -> Decision
 
 - T−1 日信号（`score`，已剥离 `ret`）；
 - 复权调整后的当前持仓与可用现金；
-- `tradable_info`：T_exec 日各股可交易性--`paused` / `limit_buy` / `limit_sell` / 当日成交量上限（`volume × volume_threshold`）；
+- `tradable_info`：T_exec 日各股可交易性--`paused` / `limit_buy` / `limit_sell` / 当日成交量上限（`volume × volume_threshold`；`volume_threshold = None` 时为 ∞，不设限）；
 - T_exec 日 `deal_price` 列（用于委托定价与金额换算）。
 
 涨跌停基于当日 `deal_price` 对 `pre_close` 判定：`deal_price = "open"` 时开盘竞价结束即可得，属合法可见；`deal_price = "close" / "vwap"` 时判定价格与成交价在决策时点不可得，属于"以收盘价/全日均价成交"的**简化假设**（研究近似：信号仍为 T−1 日，不构成对盘后数据的策略性利用）。策略**不可见**当日行情的其他列，也不可见信号 `ret` 列。内置策略委托价格统一取当日 `deal_price`。
+
+同样属于简化假设：`tradable_info` 的当日成交量上限取自**全日**成交量，在 `deal_price = "open"` 时亦为盘后信息（开盘时不可得）。容量约束按全日量近似，与 `close` / `vwap` 成交价的前视一并接受，不视为前视偏差漏洞。
 
 ### Decision（决策）
 
@@ -190,7 +202,7 @@ gen_decision(signal, position, cash, tradable_info) -> Decision
 
 ### Exchange（交易所）
 
-模拟交易所。持有行情数据，判断股票可交易性（停牌、涨跌停），撮合订单（成交量裁剪、滑点、手续费、整手取整、资金/持仓约束），成交后回调账户落账。
+模拟交易所。行情数据由 `Backtest::new` 装配时注入（`Exchange::new` 只接收费用与约束参数），注入时按 `deal_price` 预计算 `limit_buy` / `limit_sell`（见 limit_threshold）。判断股票可交易性（停牌、涨跌停），撮合订单（成交量裁剪、滑点、手续费、整手取整、资金/持仓约束），成交后回调账户落账。
 
 - 可交易性判断：`check_stock_suspended`（停牌）、`check_stock_limit`（涨跌停）、`is_stock_tradable`（是否可交易）
 - 撮合入口：`deal_order`
@@ -221,7 +233,7 @@ gen_decision(signal, position, cash, tradable_info) -> Decision
 
 回测结果的指标容器。目前实现：
 
-- `PortfolioMetrics`：组合层面逐 bar 指标——总资产、收益率、换手率、成本率、持仓市值、现金、基准收益（默认 **zz1000**，可自定义）。
+- `PortfolioMetrics`：组合层面逐 bar 指标——总资产、收益率、换手率、成本率、持仓市值、现金、基准收益（由 `gen_report` 显式指定；便捷入口 `gen_report_default()` 取 **zz1000**）。
 
 ---
 
@@ -240,7 +252,7 @@ for T_exec in 交易日历 ∩ [start_date, end_date):
     4. 撮合：Exchange.deal_order 逐单撮合，成交价取 T_exec 日的 deal_price 列；
        卖单先于买单处理，卖出回款（扣除费用后）当日即可用于买入。
     5. 日终估值与记账：
-       - 每只持仓的 price 更新为 T_exec 日收盘价；当日停牌/无行情的持仓沿用最近一个有效收盘价；
+       - 每只持仓的 price 更新为 T_exec 日收盘价；当日停牌 / 无行情 / close 缺失的持仓沿用最近一个有效收盘价（有效 = 最近一个未停牌且 close 为正的行情行的收盘价；停牌行即使带 close 也不采用，二者数值通常相同）；
        - account_value = cash + Σ(volume × price)；
        - 记录 PortfolioMetrics 逐 bar 指标。
 ```
@@ -313,7 +325,7 @@ cost_price /= factor_ratio                  // 除权导致成本价降低
    
    期初空仓时持仓数为 0，首个调仓日买入 `top_n` 只；持仓满 `top_n` 且计划卖出全部成交时，退化为"卖出几只买几只"。`n_buy` 同时不超过当日可用候选（有信号且可交易）数量。
 
-3. **资金分配**：买单等权分配——每单金额 =（可用现金 + 计划卖出全部成交的预期回款）/ 计划买入只数 `n_buy`；委托价格取 T_exec 日 `deal_price`，委托股数 = 每单金额 / 委托价格（最终以 Exchange 撮合与整手取整为准）。金额在生成决策时一次性确定：第 4 条核减买单只丢单、**不重新分配**，剩余买单保持原金额，多余现金留存。
+3. **资金分配**：买单等权分配——每单金额 =（可用现金 + 计划卖出全部成交的预期回款）/ 计划买入只数 `n_buy`；**预期回款为毛额口径：Σ(卖出委托量 × T_exec 日 `deal_price` 列价格)，不预估滑点与费用**（执行层摩擦对策略不可见，见信息边界），实际回款不足时由撮合阶段的资金约束反解裁剪后续买单。委托价格取 T_exec 日 `deal_price`，委托股数 = 每单金额 / 委托价格（最终以 Exchange 撮合与整手取整为准）。金额在生成决策时一次性确定：第 4 条核减买单只丢单、**不重新分配**，剩余买单保持原金额，多余现金留存。
 
 4. **卖不掉的处理**：因跌停/停牌/成交量裁剪导致卖出失败或部分成交的股票保留在持仓中，**继续占用 `top_n` 名额**。由 Backtest 编排两阶段撮合：先处理全部卖单，随后按实际卖出结果核减买单（`n_buy` 收缩为 `top_n − 卖出成交后的实际持仓数`，按 `score` 升序丢弃多余买单），再逐笔撮合买单，避免超配与资金不足。
 
@@ -340,7 +352,7 @@ cost_price /= factor_ratio                  // 除权导致成本价降低
 
 ### deal_price —— 成交价格
 
-订单成交价取自行情的哪一列，当前支持 `"open"`、`"close"`、`"vwap"`（对应 `stock_bar.csv` 的 `vwap` 列）。当日该列缺失 / NaN（如无成交日 `vwap = money / volume` 为 NaN）时该股不可交易，见"数据校验"。
+订单成交价取自行情的哪一列，当前支持 `"open"`、`"close"`、`"vwap"`（对应 `stock_bar.csv` 的 `vwap` 列）；传入不支持的值在 Exchange 构建时返回 `Err`。当日该列缺失 / NaN / ≤ 0（如无成交日 `vwap = money / volume` 无效）时该股不可交易，见"数据校验"。
 
 ### open_cost —— 买入费率
 
@@ -358,11 +370,11 @@ cost_price /= factor_ratio                  // 除权导致成本价降低
 
 - 类型：`float`，默认 `5.0`（元）。
 - 单笔最低手续费：`trade_cost = max(trade_val × cost_ratio, min_cost)`；成交量为 0 时费用归零。
-- 现金约束反解可买数量时，按两个 regime 分别求解并取可行解中的较大者：
+- 现金约束反解可买数量时，按两个 regime 分别求解并取可行解中的较大者（**反解与费用计算中的 `deal_price` 均指滑点调整后的实际成交价**，即回填到 `Order.deal_price` 的口径，非行情列 / 委托价，否则会超买）：
   - 比例费 regime：`shares ≤ cash / (deal_price × (1 + cost_ratio))`，要求解落在 `shares × deal_price × cost_ratio ≥ min_cost` 区间；
   - 固定费 regime：`shares ≤ (cash − min_cost) / deal_price`，要求解落在 `shares × deal_price × cost_ratio < min_cost` 区间；
   - 现金连最低费用都不够时，订单成交量置 0。
-- 卖出费用允许超过卖出成交金额（此时该笔净回款为负），不 cap 到成交金额。
+- 卖出费用允许超过卖出成交金额（此时该笔净回款为负），不 cap 到成交金额；净回款为负时直接扣减现金，**允许现金为负**（量级为单笔最低费用），总资产与报表照常按负现金计算。
 
 ### fixed_slippage —— 固定滑点
 
@@ -412,9 +424,9 @@ cost_price /= factor_ratio                  // 除权导致成本价降低
   limit_sell = change ≤ down_chg × (limit_threshold / 0.1)
   ```
   
-  其中 `change` 使用 `deal_price` 参数对应的价格列计算（如 `deal_price = "open"` 时基于开盘价判定触板）；因此 `limit_buy`/`limit_sell` 不能脱离 `deal_price` 预计算，应在 Exchange 构建时按 deal_price 计算。`limit_threshold / 0.1` 是容差比例：如 `0.0985` 表示达到当日实际涨停幅度的 98.5% 即判定触板（对 10% 板幅股票触发线为 9.85%，距涨停约 0.15 个百分点；对 20% 板幅为 19.7%），防止买入"接近涨停、实际无法成交"的股票。板幅由 `high_limit`/`low_limit` 对 `pre_close` 反推，天然兼容 5%（ST）/10%/20% 不同板幅及 tick 舍入，公式中的 `0.1` 仅为归一化基准。
+  其中 `change` 使用 `deal_price` 参数对应的价格列计算（如 `deal_price = "open"` 时基于开盘价判定触板）；因此 `limit_buy`/`limit_sell` 不能脱离 `deal_price` 预计算，在行情注入 Exchange 时按 deal_price 计算。`limit_threshold / 0.1` 是容差比例：如 `0.0985` 表示达到当日实际涨停幅度的 98.5% 即判定触板（对 10% 板幅股票触发线为 9.85%，距涨停约 0.15 个百分点；对 20% 板幅为 19.7%），防止买入"接近涨停、实际无法成交"的股票。板幅由 `high_limit`/`low_limit` 对 `pre_close` 反推，天然兼容 5%（ST）/10%/20% 不同板幅及 tick 舍入，公式中的 `0.1` 仅为归一化基准。
 
-- `limit_buy = true` 时不可买入，`limit_sell = true` 时不可卖出；停牌（`paused = 1` 或 `close` 缺失）一律不可交易。
+- `limit_buy = true` 时不可买入，`limit_sell = true` 时不可卖出；停牌（`paused = 1` 或 `close` 缺失）一律不可交易。**判定顺序：先停牌，后涨跌停**。停牌日的行情行常为同值 OHLC（`high_limit = low_limit = close`），其 limit 预计算会得到 `change = 0 ≥ up_chg = 0` 即 `limit_buy = true` 的无意义结果，必须由停牌检查先行拦截。
 
 - `pre_close` 缺失（如上市首日）时该股当日不做涨跌停判定，`limit_buy`/`limit_sell` 均为 false；`high_limit` / `low_limit` 自身缺失时同样置 false 并 warning（见"数据校验"）。
 
@@ -424,7 +436,7 @@ cost_price /= factor_ratio                  // 除权导致成本价降低
 
 - **处理顺序**：先卖后买；买单按 `score` 降序依次撮合（分数高的优先获得资金）。
 - **部分成交**：允许。因成交量限制或资金不足被裁剪的订单按裁剪后数量成交，不回补、不重试。
-- **资金不足反解**：买单可成交量 = min(委托量, 成交量上限, 现金反解可买股数)，再整手取整。
+- **资金不足反解**：买单可成交量 = min(委托量, 成交量上限, 现金反解可买股数)，再整手取整（反解用滑点调整后成交价，见 min_cost 一节）。
 - **卖出超额**：卖出委托量超过持仓量时，截断至当前持仓量并打 warning。
 - **当日新买入的复核**：同一订单列表中买、卖同一股票属于策略错误，直接报错；同股多笔买单合并为一笔（数量相加）。
 
@@ -434,8 +446,9 @@ cost_price /= factor_ratio                  // 除权导致成本价降低
 
 ### 代码规范（instrument）
 
-- 股票：固定 8 位，交易所前缀 + 6 位数字，`SH` 表示上海证券交易所，`SZ` 表示深圳证券交易所，如 `SH600000`、`SZ000006`；
-- 指数/基准：代码长度不固定，沿用数据源原始代码（如 `SH000300`、`CSI932000`、`CSIKC`）。
+- 股票：固定 8 位，交易所前缀 + 6 位数字，`SH` 表示上海证券交易所，`SZ` 表示深圳证券交易所，如 `SH600000`、`SZ000006`；暂时仅支持上交所与深交所，**不含北交所**（BJ 前缀代码不在支持范围），后续会支持；
+- 指数/基准：代码长度不固定，沿用数据源原始代码（如 `SH000300`、`CSI932000`、`CSIKC`），不参与下述 int 编码转换。
+- **内部 int 编码（效率优化）**：为追求效率，加载后可将股票 `instrument` 转为 int：去掉交易所前缀，取 6 位数字部分的整数值（如 `SH000006` -> 6、`SH600000` -> 600000）。沪市股票数字段为 6xxxxx / 68xxxx，深市为 0xxxxx / 3xxxxx，两市不重叠，int 编码在股票范围内唯一（北交所数字段以 4 / 8 / 9 开头，亦不重叠，后续接入时该编码规则无需变更）；无法按该规则解析的代码按数据校验报错。命名约定：**字符串口径（`SH600000`）沿用 `instrument`，用于 CSV 输入输出与对外接口；int 口径（600000）统一用 `code` 一词**命名相关变量与列名（如 `stock_code`、polars 列 `code`），加载后正向转换、导出前反向映射回字符串。
 
 基准名称映射（`gen_report` 的参数 → 数据文件中的 instrument）：
 
@@ -449,7 +462,7 @@ cost_price /= factor_ratio                  // 除权导致成本价降低
 
 > TODO：`benchmark.csv` 中还包含 `CSI000400`，其指数名称与别名待确认后补充进映射表。注意其数据仅覆盖至 **2025-07-04**（其余基准覆盖至 2026-08-20）：若加入映射表且回测区间超出该日，将触发基准覆盖校验报错，加入前需先补全数据。
 > 
-> 各基准可用区间不一致：`CSI932000`（zz2000）自 **2020-06-20** 起（且含非交易日回填行），`CSI000400` 止于 2025-07-04，其余自 2020-01-02 起覆盖至 2026-08-20；回测区间超出所选基准覆盖范围时触发覆盖校验报错。
+> （下述基准覆盖区间为数据快照事实，数据更换后需同步更新；`tmp_data` 仅作格式参考，不作为数据正确性依据。）各基准可用区间不一致：`CSI932000`（zz2000）自 **2020-06-20** 起（且含非交易日回填行），`CSI000400` 止于 2025-07-04，其余自 2020-01-02 起覆盖至 2026-08-20；回测区间超出所选基准覆盖范围时触发覆盖校验报错。
 
 ### stock_bar.csv —— 股票日行情
 
@@ -482,7 +495,7 @@ cost_price /= factor_ratio                  // 除权导致成本价降低
 | `instrument` | 基准指数代码 |
 | `benchmark`  | 当日收益率  |
 
-一个文件可包含多个基准指数；`BTData::load_benchmark` 全部加载，`gen_report(name)` 按映射表选定其中一个计算基准收益与超额收益，缺省为 **zz1000**。
+一个文件可包含多个基准指数；`BTData::load_benchmark` 全部加载，`gen_report(name)` 按映射表选定其中一个计算基准收益与超额收益（名称不在映射表中返回 `Err`）；便捷入口 `gen_report_default()` 等价于 `gen_report("zz1000", "arithmetic")`。
 
 ### pred.csv —— 预测信号
 
@@ -495,7 +508,7 @@ cost_price /= factor_ratio                  // 除权导致成本价降低
 
 ### hist_position.csv —— 历史持仓输出
 
-`export_hist_position` 的输出格式，逐交易日一行一只持仓（字段参照仓库内 `hist_position.csv`；注意该参考文件的日期写法 `2022/10/11` 为导出样本，实际输出统一为 `YYYY-MM-DD`）：
+`export_hist_position` 的输出格式，逐交易日一行一只持仓（字段参照仓库内 `hist_position.csv`，**该文件仅作格式参考**；其日期写法 `2022/10/11` 为导出样本，实际输出统一为 `YYYY-MM-DD`）：
 
 | 字段           | 含义                                                 |
 | ------------ | -------------------------------------------------- |
@@ -510,13 +523,28 @@ cost_price /= factor_ratio                  // 除权导致成本价降低
 - 停牌或已无行情（退市）的持仓照常输出一行：`price` 沿用最近一个有效收盘价，`count_day` 照常 +1（持仓仍在）。
 - 不输出 CASH 行：各日 `weight` 之和 ≤ 1，差额即为当日现金占比。
 
+### trades.csv —— 成交记录输出
+
+`export_trades` 的输出格式，逐订单一行（含未成交订单，`deal_volume = 0`）：
+
+| 字段            | 含义                  |
+| ------------- | ------------------- |
+| `datetime`    | 交易日期（`YYYY-MM-DD`） |
+| `instrument`  | 股票代码               |
+| `side`        | 方向：`buy` / `sell`  |
+| `volume`      | 委托数量（股，绝对值）        |
+| `price`       | 委托价格               |
+| `deal_volume` | 实际成交数量（股，绝对值）      |
+| `deal_price`  | 实际成交价（含滑点）         |
+| `deal_cost`   | 实际交易费用             |
+
 ## 指标定义（Report 附录）
 
 记组合逐日总资产为 `V_t`（含现金），逐日收益率 `r_t = V_t / V_{t−1} − 1`，基准逐日收益率 `b_t`，年化交易日数 `N = 252`，回测区间交易日数 `n`。
 
 ### export_data() 输出（report_data.csv）
 
-`export_data()` 输出逐 bar 原始指标（字段参照仓库内 `report_data.csv`；该参考文件的日期写法 `2022/9/30` 为导出样本，实际输出统一为 `YYYY-MM-DD`）：
+`export_data()` 输出逐 bar 原始指标（字段参照仓库内 `report_data.csv`，**该文件仅作格式参考**；其日期写法 `2022/9/30` 为导出样本，实际输出统一为 `YYYY-MM-DD`）：
 
 | 字段               | 含义                            |
 | ---------------- | ----------------------------- |
@@ -553,13 +581,13 @@ cost_price /= factor_ratio                  // 除权导致成本价降低
 
 - **净值口径**：上表公式默认基于**含成本**收益序列 `r_t`（年化、波动、夏普、回撤同此）；如需不含成本口径，将 `r_t` 替换为 `r'_t` 同式计算。
 
-- **首日口径**：首日 `r_0 = 0` 而 `b_0` 为基准当日实际收益，故 `excess_0 = −b_0`（与参考输出一致），不做特殊处理。注意副作用：若首个交易日即发生交易，当日盈亏（含首日费用）不进入收益率序列，仅体现在净值水平中。
+- **首日口径**：首日 `r_0 = 0` 而 `b_0` 为基准当日实际收益，故 `excess_0 = −b_0`，不做特殊处理。注意副作用：若首个交易日即发生交易，当日盈亏（含首日费用）**不进入收益率序列，也不进入净值序列**（净值期初恒为 1），仅体现在 `export_data` 的 `account` 列中，并通过 `V_0` 的水平影响后续收益率的分母。年化公式中的 `n` 为区间交易日数（含首日），`r_0 = 0` 占用一天，属约定口径。
 
 - **不含成本口径**：`return_without_cost` 基于费用扣减前的资产快照计算——账户需同时维护两条资产序列：含成本 `V_t`（费用扣现金）与不含成本 `V'_t`（费用不扣），`r'_t = V'_t / V'_{t−1} − 1`，`excess_without_cost = r'_t − b_t`。**该口径为近似**：`V'_t` 由 `V_t` 加回累计费用得到，忽略费用通过资金约束反解对成交股数的二阶影响（严格口径需重放一遍无费用回测），误差为费率量级，可接受。
 
 - **换手率**：只输出双边口径（见上表 `turnover`）。
 
-- **超额收益口径**：由 `gen_report` 的参数 `excess_method: "arithmetic" | "geometric"` 配置，默认 `"arithmetic"`（算术差 `r − b`）；`"geometric"` 为几何差 `(1+r)/(1+b) − 1`。
+- **超额收益口径**：由 `gen_report` 的参数 `excess_method: "arithmetic" | "geometric"` 配置（便捷入口 `gen_report_default` 取 `"arithmetic"`，为算术差 `r − b`）；`"geometric"` 为几何差 `(1+r)/(1+b) − 1`。
 
 ---
 
@@ -573,14 +601,15 @@ IC / RankIC 分析属于离线信号评估，利用 `pred.csv` 的 `ret` 列。�
 
 ### 测试与验收
 
-- 单元测试覆盖：涨跌停判定、滑点计算、费用与 min_cost 反解、整手取整（含 SH688/SH689 的 200 股规则）、factor 复权调整（含当日新买入不调整、停牌恢复补调）、期初建仓（空仓首日买入 `top_n`）、除权日卖出按调整后 volume、停牌估值沿用、`vwap` NaN 不可交易。
-- 端到端：用仓库内数据跑通完整回测。数据覆盖：`stock_bar.csv` 自 2020-01-02 起，`pred.csv` 为 2022-10-10 ~ 2026-07-28。
-- 正确性基准：与仓库内参考输出（`report_data.csv` / `hist_position.csv`）对拍。参考输出参数可从文件反推：初始资金 5,000,000，`top_n = 50`，区间 2022-09-30 ~ 2026-07-29。
-  - 已知预期差异：参考输出存在 4 个交易日持仓 51 只（2023-04-17、2024-05-06、2024-05-07、2024-07-01，大于 `top_n`），提示其生成系统在卖出失败时未核减买单；本系统按内置策略第 4 条核减，正常流程持仓只数不超过 `top_n`。
-  - 数值容差：逐日总资产相对误差 ≤ 1e-6（容忍浮点累乘顺序差异），逐笔成交明细（标的、数量、成交价、费用）要求完全一致。
+- **单元测试**：涨跌停判定、滑点计算、费用与 min_cost 反解、整手取整（含 SH688/SH689 的 200 股规则）、factor 复权调整（含当日新买入不调整、停牌恢复补调）、期初建仓（空仓首日买入 `top_n`）、除权日卖出按调整后 volume、停牌估值沿用、`deal_price` 列无效（缺失 / NaN / ≤ 0）不可交易。缺失类分支（`pre_close` / `high_limit` / `low_limit` / `factor` / `deal_price` 列缺失或非法）在真实数据中未必出现，须以**合成数据**构造用例覆盖。
+- **合成用例精确验收（正确性基准）**：构造可手算的短用例（3~5 只股票、约 10 个交易日的小型 `stock_bar` / `pred` / `benchmark`），价格取整数或有限小数以消除浮点歧义，覆盖：涨跌停拦截、停牌、除权（factor 变化）、退市（行情终止）估值沿用、min_cost 触发、整手取整不足一手、资金约束反解、两阶段撮合核减买单。断言：
+  - 逐笔成交明细（标的、方向、数量、成交价、费用）与手算值**完全一致**（经 `export_trades` 输出核对）；
+  - 逐日账户序列（account / value / cash）与手算值**完全一致**；
+  - 不变量：正常流程持仓只数 ≤ `top_n`；卖出委托量截断至持仓量；当日买入不可当日卖出（T+1）。
+- **端到端冒烟测试**：用仓库内数据（`tmp_data/`，**仅作格式与规模参考**）跑通完整回测：全区间无报错、无 panic，三个输出文件（hist_position / trades / report_data）的列名与日期格式（`YYYY-MM-DD`）符合"数据文件格式"约定。**不做数值对拍**：仓库内 `report_data.csv` / `hist_position.csv` 不作为正确性基准。
+- 若后续提供权威参考输出（真实数据 + 完整参数表），可追加大规模回归：逐日总资产相对误差 ≤ 1e-6（容忍浮点累乘顺序差异），成交价绝对误差 ≤ 1e-9，逐笔数量完全一致。
 
 ### 性能
 
 - 目标：全量 A 股（约 5000 只 × 6 年日频）单次回测在分钟级完成；数据处理优先使用 polars 向量化，避免逐行 for 循环。
-
--
+- 效率手段：将 `instrument` 转为 int 编码（`code`，见"代码规范"），加速 join / 分组 / 哈希与比较。
