@@ -194,10 +194,10 @@ impl Report {
         Ok(())
     }
 
-    /// 绘制净值 / 回撤 / 超额三条曲线，输出 report_plot.png（X 轴为交易日）。
-    pub fn plot(&self) -> Result<()> {
+    /// 绘制净值 / 回撤 / 超额三条曲线，输出 PNG 到指定路径（如 report_plot.png；X 轴为交易日）。
+    pub fn plot(&self, path: &str) -> Result<()> {
         plot::plot_report(
-            "report_plot.png",
+            path,
             &self.dates,
             &self.cum_with_cost,
             &self.cum_benchmark,

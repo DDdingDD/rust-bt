@@ -60,12 +60,12 @@ fn main() -> anyhow::Result<()> {
         .with_progress(true);
     let bt_result = backtest.run(&signal, start_date, end_date)?;
 
-    // 8. 输出结果
-    bt_result.export_hist_position("hist_position.csv")?;
-    bt_result.export_trades("trades.csv")?;
+    // 8. 输出结果（路径由调用方指定；示例工程统一写入 output/，已 gitignore）
+    bt_result.export_hist_position("output/hist_position.csv")?;
+    bt_result.export_trades("output/trades.csv")?;
     let report = bt_result.gen_report("zz1000", "arithmetic")?;
-    report.export_data("report_data.csv")?;
-    report.plot()?;
+    report.export_data("output/report_data.csv")?;
+    report.plot("output/report_plot.png")?;
 
     Ok(())
 }
@@ -107,7 +107,7 @@ impl BTResult {
 // 报告：export_data 输出逐 bar 原始指标；plot 绘制净值/回撤/超额曲线并输出 PNG
 impl Report {
     fn export_data(&self, path: &str) -> anyhow::Result<()>;
-    fn plot(&self) -> anyhow::Result<()>; // 输出 report_plot.png：净值 / 回撤 / 超额三条曲线，X 轴为交易日
+    fn plot(&self, path: &str) -> anyhow::Result<()>; // 输出 PNG（如 report_plot.png）：净值 / 回撤 / 超额三条曲线，X 轴为交易日
 }
 ```
 

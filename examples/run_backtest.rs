@@ -51,14 +51,16 @@ fn main() -> anyhow::Result<()> {
     let mut backtest = Backtest::new(data, account, exchange, strategy).with_progress(true);
     let bt_result = backtest.run(&signal, start_date, end_date)?;
 
-    // 8. 输出结果
-    bt_result.export_hist_position("hist_position.csv")?;
-    bt_result.export_trades("trades.csv")?;
+    // 8. 输出结果：统一写入 output/（已 gitignore，避免产物散落仓库根目录）
+    std::fs::create_dir_all("output")?;
+    bt_result.export_hist_position("output/hist_position.csv")?;
+    bt_result.export_trades("output/trades.csv")?;
     let report = bt_result.gen_report("zz1000", "arithmetic")?;
-    report.export_data("report_data.csv")?;
-    report.plot()?;
+    report.export_data("output/report_data.csv")?;
+    report.plot("output/report_plot.png")?;
 
     println!("回测耗时: {:.2?}", bt_result.elapsed());
+    println!("输出产物已写入 output/（hist_position / trades / report_data / report_plot）");
     println!("{:#?}", report.derived);
 
     Ok(())

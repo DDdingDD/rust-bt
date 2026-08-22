@@ -1,4 +1,4 @@
-//! plotters 绘图（架构 D10）：净值 / 回撤 / 超额三子图 -> report_plot.png。
+//! plotters 绘图（架构 D10）：净值 / 回撤 / 超额三子图 -> PNG（路径由调用方指定）。
 
 use chrono::NaiveDate;
 use plotters::prelude::*;

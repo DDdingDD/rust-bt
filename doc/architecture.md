@@ -75,7 +75,7 @@ rust-bt/
 │   ├── result.rs               # BTResult：hist_position / trades 导出、gen_report
 │   └── report/
 │       ├── mod.rs              # Report：PortfolioMetrics、export_data、衍生指标
-│       └── plot.rs             # plotters 绘图：净值 / 回撤 / 超额 → report_plot.png
+│       └── plot.rs             # plotters 绘图：净值 / 回撤 / 超额 → PNG（路径由调用方指定）
 ├── examples/
 │   └── run_backtest.rs         # 与规范"使用方法"一致的端到端示例
 └── tests/
@@ -375,7 +375,7 @@ impl BTResult {
 pub struct Report { metrics: DataFrame /* export_data 逐 bar 表 */, derived: DerivedStats }
 impl Report {
     pub fn export_data(&self, path: &str) -> Result<()>;
-    pub fn plot(&self) -> Result<()>;   // plotters -> report_plot.png，净值/回撤/超额三子图
+    pub fn plot(&self, path: &str) -> Result<()>;   // plotters -> PNG（调用方指定路径），净值/回撤/超额三子图
 }
 ```
 
@@ -433,7 +433,7 @@ pub enum BtError {
 | chrono | `NaiveDate`，`YYYY-MM-DD` 解析/格式化 |
 | thiserror / anyhow | 错误分层（见 D11） |
 | log | warning 通道（D9） |
-| plotters | report_plot.png（D10） |
+| plotters | 报告 PNG 绘制（D10，路径由调用方指定） |
 | indicatif | 终端进度条：stderr 渲染、按时间节流重绘（D12） |
 | env_logger（dev/example） | 示例与测试的日志初始化 |
 
