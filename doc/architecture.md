@@ -324,13 +324,15 @@ impl Exchange {
 ```rust
 pub struct Backtest { data: BTData, account: Account, exchange: Exchange, strategy: Box<dyn Strategy>,
                       initial_cash: f64 /* 账户构造时的期初现金；装配 BTResult 时导出（§4.9 报表首日分母） */,
-                      progress: bool /* 终端进度条开关，默认 false（D12） */ }
+                      progress: bool /* 终端进度条开关，默认 false（D12） */,
+                      has_run: bool /* run 单次性守卫：首次运行消耗账户 / 基准 / 逐日记录（take 语义），二次调用 Err */ }
 impl Backtest {
     pub fn new(data: BTData, account: Account, exchange: Exchange, strategy: Box<dyn Strategy>) -> Self;
     // new 内完成：exchange 注入行情（按 deal_price 预计算 limit 列）
     /// 进度条开关（默认关闭）：启用后 run 期间向 stderr 渲染按交易日推进的进度条，
     /// 总数 = 对齐区间交易日数（启动校验后确定），结束行显示总耗时（D12）
     pub fn with_progress(self, enabled: bool) -> Self;
+    /// 只能调用一次；二次调用返回 Err（InvalidParam），再次回测需重新装配
     pub fn run(&mut self, signal: &Signal, start_date: &str, end_date: &str) -> Result<BTResult>;
 }
 ```

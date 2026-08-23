@@ -20,16 +20,8 @@ fn main() -> anyhow::Result<()> {
 
     let cfg = BtConfig::load(&config_path)?;
 
-    // 1. 加载信号
-    let signal = load_signal(cfg.signal())?;
-
-    // 2. 加载行情与基准数据
-    let data = BTData::new()
-        .load_stock_bar(cfg.stock_bar())?
-        .load_benchmark(cfg.benchmark_data())?
-        .build()?;
-
-    // 3. 账户 / 交易所 / 策略
+    // 1. 账户 / 交易所 / 策略（Exchange::new 的费用 / 阈值校验先于数据加载执行，
+    //    参数错误时 fail fast，不必等数百 MB 行情加载完）
     let account = Account::new(cfg.account.initial_cash);
     let exchange = Exchange::new(
         &cfg.exchange.deal_price,
@@ -50,6 +42,15 @@ fn main() -> anyhow::Result<()> {
         // BtConfig::load 已校验，此处不可达
         other => anyhow::bail!("未知策略: {other}"),
     };
+
+    // 2. 加载信号
+    let signal = load_signal(cfg.signal())?;
+
+    // 3. 加载行情与基准数据
+    let data = BTData::new()
+        .load_stock_bar(cfg.stock_bar())?
+        .load_benchmark(cfg.benchmark_data())?
+        .build()?;
 
     // 4. 运行回测
     let mut backtest = Backtest::new(data, account, exchange, strategy).with_progress(cfg.progress);

@@ -116,3 +116,24 @@ fn duplicate_buys_merged() {
     assert_eq!(t.len(), 1);
     check_trade(&t[0], 1, S, Side::Buy, 200.0, 10.0, 200.0, 10.0, 0.0);
 }
+
+#[test]
+fn run_twice_rejected() {
+    let dir = setup();
+    // run 单次性：首次运行消耗账户 / 基准 / 逐日记录状态，二次调用直接报错而非静默出错
+    let signal = load_signal(dir.path().join("pred.csv").to_str().unwrap()).unwrap();
+    let data = BTData::new()
+        .load_stock_bar(dir.path().join("stock_bar.csv").to_str().unwrap())
+        .unwrap()
+        .build()
+        .unwrap();
+    let exchange = Exchange::new("open", 0.0, 0.0, 0.0, 0.0, 0.0, None, Some(0.0985)).unwrap();
+    let strategy: Box<dyn Strategy> = Box::new(TopkDropoutStrategy::new(2, 1));
+    let mut bt = Backtest::new(data, Account::new(100_000.0), exchange, strategy);
+
+    bt.run(&signal, "2026-01-05", "2026-01-08").unwrap();
+    match bt.run(&signal, "2026-01-05", "2026-01-08") {
+        Err(BtError::InvalidParam(m)) => assert!(m.contains("只能调用一次"), "错误信息: {m}"),
+        other => panic!("二次 run 应报 InvalidParam，实际 is_err={}", other.is_err()),
+    }
+}

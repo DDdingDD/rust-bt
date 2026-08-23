@@ -6,6 +6,8 @@
 use anyhow::{anyhow, Context};
 use serde::Deserialize;
 
+use crate::types::{BenchmarkName, DealPrice, ExcessMethod};
+
 /// 顶层配置。
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
@@ -42,9 +44,15 @@ impl BtConfig {
             ("period.start_date", &self.period.start_date),
             ("period.end_date", &self.period.end_date),
         ] {
-            if val.as_deref().map_or(true, str::is_empty) {
+            if val.as_deref().is_none_or(str::is_empty) {
                 return Err(anyhow!("配置缺少必填字段: {key}"));
             }
+        }
+        // 数值与枚举参数在加载期统一校验：避免加载数百 MB 行情后（甚至跑完整个
+        // 回测后）才因参数拼写 / 越界报错
+        let cash = self.account.initial_cash;
+        if !cash.is_finite() || cash <= 0.0 {
+            return Err(anyhow!("account.initial_cash 须为正数，收到: {cash}"));
         }
         if self.strategy.name != "topk_dropout" {
             return Err(anyhow!(
@@ -52,6 +60,22 @@ impl BtConfig {
                 self.strategy.name
             ));
         }
+        if self.strategy.top_n < 1 {
+            return Err(anyhow!(
+                "strategy.top_n 须 >= 1，收到: {}",
+                self.strategy.top_n
+            ));
+        }
+        DealPrice::parse(&self.exchange.deal_price)
+            .map_err(|e| anyhow!("exchange.deal_price 非法: {e}"))?;
+        if BenchmarkName::from_name(&self.report.benchmark).is_none() {
+            return Err(anyhow!(
+                "report.benchmark 未知基准名称: {}（不在映射表）",
+                self.report.benchmark
+            ));
+        }
+        ExcessMethod::parse(&self.report.excess_method)
+            .map_err(|e| anyhow!("report.excess_method 非法: {e}"))?;
         Ok(())
     }
 
@@ -314,7 +338,7 @@ exchange:
   volume_threshold: null
   limit_threshold: null
 report:
-  benchmark: "csi300"
+  benchmark: "hs300"
   excess_method: "geometric"
 output:
   dir: "out2"
@@ -333,7 +357,7 @@ progress: false
         assert_eq!(cfg.exchange.volume_threshold, None);
         assert_eq!(cfg.exchange.limit_threshold, None);
         assert_eq!(cfg.exchange.close_cost, 0.00065);
-        assert_eq!(cfg.report.benchmark, "csi300");
+        assert_eq!(cfg.report.benchmark, "hs300");
         assert_eq!(cfg.report.excess_method, "geometric");
         assert_eq!(cfg.output.dir, "out2");
         assert_eq!(cfg.output.report_plot, "plot.html");
@@ -346,5 +370,39 @@ progress: false
         let yaml = MINIMAL_YAML.replace("period:", "strategy:\n  name: \"momentum\"\nperiod:");
         let err = parse(&yaml).unwrap_err().to_string();
         assert!(err.contains("momentum"), "报错应含策略名: {err}");
+    }
+
+    #[test]
+    fn invalid_initial_cash_errors() {
+        // 0 / 负数 / NaN 的期初资金会让报告收益率静默产生 NaN，加载期即报错
+        for bad in ["0", "-1000000", ".nan"] {
+            let yaml = format!("{MINIMAL_YAML}account:\n  initial_cash: {bad}\n");
+            let err = parse(&yaml).unwrap_err().to_string();
+            assert!(err.contains("initial_cash"), "报错应含字段名: {err}");
+        }
+    }
+
+    #[test]
+    fn top_n_zero_errors() {
+        // top_n = 0 在策略构造时会 panic（库层 assert），配置层提前拦截为友好报错
+        let yaml = format!("{MINIMAL_YAML}strategy:\n  top_n: 0\n");
+        let err = parse(&yaml).unwrap_err().to_string();
+        assert!(err.contains("top_n"), "报错应含字段名: {err}");
+    }
+
+    #[test]
+    fn invalid_enum_params_error_at_load() {
+        // 拼写错误的枚举参数在加载期报错，而非数据加载后 / 回测结束后
+        let yaml = format!("{MINIMAL_YAML}report:\n  benchmark: \"csi300\"\n");
+        let err = parse(&yaml).unwrap_err().to_string();
+        assert!(err.contains("csi300"), "报错应含基准名: {err}");
+
+        let yaml = format!("{MINIMAL_YAML}report:\n  excess_method: \"geo\"\n");
+        let err = parse(&yaml).unwrap_err().to_string();
+        assert!(err.contains("excess_method"), "报错应含字段名: {err}");
+
+        let yaml = format!("{MINIMAL_YAML}exchange:\n  deal_price: \"avg\"\n");
+        let err = parse(&yaml).unwrap_err().to_string();
+        assert!(err.contains("deal_price"), "报错应含字段名: {err}");
     }
 }

@@ -27,6 +27,8 @@ pub struct Backtest {
     initial_cash: f64,
     /// 终端进度条开关，默认 false
     progress: bool,
+    /// run 单次性守卫：首次运行消耗账户 / 基准 / 逐日记录状态，禁止二次调用
+    has_run: bool,
 }
 
 impl Backtest {
@@ -53,6 +55,7 @@ impl Backtest {
             strategy,
             initial_cash,
             progress: false,
+            has_run: false,
         }
     }
 
@@ -64,7 +67,17 @@ impl Backtest {
     }
 
     /// 运行回测：区间 [start_date, end_date) 按交易日历对齐。
+    ///
+    /// 只能调用一次：首次运行消耗账户持仓 / 基准数据 / 逐日记录（`take` 语义），
+    /// 二次调用直接报错；如需再次回测请重新装配 `Backtest`。
     pub fn run(&mut self, signal: &Signal, start_date: &str, end_date: &str) -> Result<BTResult> {
+        if self.has_run {
+            return Err(BtError::InvalidParam(
+                "Backtest::run 只能调用一次（账户与基准状态已在首次运行中消耗），请重新装配 Backtest"
+                    .into(),
+            ));
+        }
+        self.has_run = true;
         let timer = Instant::now();
 
         // ---- 0. 启动校验 ----
