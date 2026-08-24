@@ -94,13 +94,17 @@ const PANEL_TITLES: [&str; 7] = [
     "超额回撤（不含成本）",
 ];
 
-fn push_trace(out: &mut String, name: &str, x: &str, y: &str, xaxis: &str, yaxis: &str) {
-    out.push_str("{\"mode\":\"lines\",\"name\":\"");
+fn push_trace(out: &mut String, name: &str, x: &str, y: &str, xaxis: &str, yaxis: &str, fill: bool) {
+    // lines+markers：悬停单点标记（qlib 样例口径）；回撤类 fill tozeroy 面积填充
+    out.push_str("{\"type\":\"scatter\",\"mode\":\"lines+markers\",\"name\":\"");
     out.push_str(name);
     out.push_str("\",\"x\":");
     out.push_str(x);
     out.push_str(",\"y\":");
     out.push_str(y);
+    if fill {
+        out.push_str(",\"fill\":\"tozeroy\"");
+    }
     out.push_str(",\"xaxis\":\"");
     out.push_str(xaxis);
     out.push_str("\",\"yaxis\":\"");
@@ -129,7 +133,7 @@ pub(crate) fn render_html(curves: &ReportCurves, derived: &DerivedStats) -> Stri
     let mut traces = String::with_capacity(64 * 1024);
     traces.push('[');
     let mut first = true;
-    let mut t = |name: &str, y: &str, i: usize| {
+    let mut t = |name: &str, y: &str, i: usize, fill: bool| {
         if !first {
             traces.push(',');
         }
@@ -139,34 +143,38 @@ pub(crate) fn render_html(curves: &ReportCurves, derived: &DerivedStats) -> Stri
         } else {
             (format!("x{}", i + 1), format!("y{}", i + 1))
         };
-        push_trace(&mut traces, name, &x, y, &xaxis, &yaxis);
+        push_trace(&mut traces, name, &x, y, &xaxis, &yaxis, fill);
     };
-    t("cum bench", &cum_bench, 0);
-    t("cum return wo cost", &cum_wo, 0);
-    t("cum return w cost", &cum_w, 0);
-    t("return wo mdd", &mdd_wo, 1);
-    t("return w cost mdd", &mdd_w, 2);
-    t("cum ex return wo cost", &ex_wo, 3);
-    t("cum ex return w cost", &ex_w, 3);
-    t("turnover", &turnover, 4);
-    t("cum ex return w cost mdd", &ex_mdd_w, 5);
-    t("cum ex return wo cost mdd", &ex_mdd_wo, 6);
+    t("cum bench", &cum_bench, 0, false);
+    t("cum return wo cost", &cum_wo, 0, false);
+    t("cum return w cost", &cum_w, 0, false);
+    t("return wo mdd", &mdd_wo, 1, true);
+    t("return w cost mdd", &mdd_w, 2, true);
+    t("cum ex return wo cost", &ex_wo, 3, false);
+    t("cum ex return w cost", &ex_w, 3, false);
+    t("turnover", &turnover, 4, false);
+    t("cum ex return w cost mdd", &ex_mdd_w, 5, true);
+    t("cum ex return wo cost mdd", &ex_mdd_wo, 6, true);
     traces.push(']');
 
-    // 布局：7 对 x/y 轴，x 轴共享刻度（仅最底面板显示日期标签）
+    // 布局：7 对 x/y 轴，与 qlib 样例口径一致 —— x 轴 category + 45° 刻度，
+    // 上 6 轴 matches 最底轴 x7（缩放联动），y 轴 zeroline/showline 开启
     let mut layout = String::with_capacity(4096);
-    layout.push_str("{\"height\":1200,\"hovermode\":\"x unified\",\"showlegend\":true,");
-    layout.push_str("\"legend\":{\"orientation\":\"h\",\"y\":1.02},");
+    layout.push_str("{\"height\":1200,\"title\":{\"text\":\" \"},");
     for (i, (lo, hi)) in Y_DOMAINS.iter().enumerate() {
         let suffix = if i == 0 { String::new() } else { (i + 1).to_string() };
         layout.push_str(&format!(
-            "\"yaxis{suffix}\":{{\"domain\":[{lo},{hi}],\"anchor\":\"x{suffix}\"}},"
+            "\"yaxis{suffix}\":{{\"domain\":[{lo},{hi}],\"anchor\":\"x{suffix}\",\"zeroline\":true,\"showline\":true,\"showticklabels\":true}},"
         ));
-        let extra = if i == 0 { "" } else { ",\"matches\":\"x\"" };
-        let tick = if i + 1 == Y_DOMAINS.len() { "true" } else { "false" };
-        layout.push_str(&format!(
-            "\"xaxis{suffix}\":{{\"anchor\":\"y{suffix}\",\"showticklabels\":{tick}{extra}}},"
-        ));
+        if i + 1 == Y_DOMAINS.len() {
+            layout.push_str(&format!(
+                "\"xaxis{suffix}\":{{\"anchor\":\"y{suffix}\",\"domain\":[0.0,1.0],\"showline\":true,\"type\":\"category\",\"tickangle\":45}},"
+            ));
+        } else {
+            layout.push_str(&format!(
+                "\"xaxis{suffix}\":{{\"anchor\":\"y{suffix}\",\"domain\":[0.0,1.0],\"matches\":\"x7\",\"showticklabels\":false,\"showline\":false,\"type\":\"category\",\"tickangle\":45}},"
+            ));
+        }
     }
     layout.push_str("\"annotations\":[");
     for (i, title) in PANEL_TITLES.iter().enumerate() {
@@ -287,6 +295,24 @@ mod tests {
         for title in PANEL_TITLES {
             assert!(html.contains(title), "缺少子图标题 {title}");
         }
+    }
+
+    #[test]
+    fn interaction_matches_qlib_example() {
+        let dates = three_dates();
+        let html = render_html(&sample_curves(&dates), &DerivedStats::default());
+        // 10 条 trace 全部 lines+markers（悬停单点标记）
+        assert_eq!(html.matches("\"mode\":\"lines+markers\"").count(), 10);
+        // 4 条回撤类 trace 面积填充
+        assert_eq!(html.matches("\"fill\":\"tozeroy\"").count(), 4);
+        // 7 根 category x 轴 + 45° 刻度，上 6 轴 matches 最底轴
+        assert_eq!(html.matches("\"type\":\"category\"").count(), 7);
+        assert_eq!(html.matches("\"tickangle\":45").count(), 7);
+        assert_eq!(html.matches("\"matches\":\"x7\"").count(), 6);
+        // 不启用 x unified（默认 closest 单点提示，与样例一致）；
+        // 内嵌 plotly.js 自身含 "hovermode" 字样，只校验生成段（指标表起）
+        let data = &html[html.find("<h3>").unwrap()..];
+        assert!(!data.contains("hovermode"));
     }
 
     #[test]
