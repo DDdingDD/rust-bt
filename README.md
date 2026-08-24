@@ -39,17 +39,17 @@ cargo test --release --test smoke_tmp_data          # tmp_data 端到端冒烟�
 ## 作为依赖引入
 
 ```toml
-# 方式一：私有 git + tag（推荐；当前已有 v0.1.0）
-rust-bt = { git = "ssh://git@codeup.aliyun.com:641c2b0a467b1259b4792ed4/rust-bt.git", tag = "v0.1.0" }
+# 方式一：私有 git + tag（推荐；当前已有 v0.1.1）
+rust-bt = { git = "ssh://git@codeup.aliyun.com:641c2b0a467b1259b4792ed4/rust-bt.git", tag = "v0.1.1" }
 
 # 方式二：GitHub 镜像（同步推送，任选其一）
-rust-bt = { git = "ssh://git@github.com:DDdingDD/rust-bt.git", tag = "v0.1.0" }
+rust-bt = { git = "ssh://git@github.com:DDdingDD/rust-bt.git", tag = "v0.1.1" }
 
 # 方式三：始终跟踪 main（开发集成，不推荐生产使用）
 rust-bt = { git = "ssh://git@codeup.aliyun.com:641c2b0a467b1259b4792ed4/rust-bt.git", branch = "main" }
 ```
 
-- 当前版本：`v0.1.0`（嵌入 API / DataFrame 信号 / 简报）
+- 当前版本：`v0.1.1`（在 v0.1.0 基础上补全 api re-export、分发说明与发布流程）
 - 升级：更新 `tag` 后执行 `cargo update`；首次拉取后 cargo 会缓存，必要时删除
   `~/.cargo/git/checkouts` 下对应目录强制刷新
 - 远端说明：`origin` 为阿里云 CodeUp（主仓库），`github` 为 GitHub 镜像；
