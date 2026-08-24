@@ -59,6 +59,14 @@ impl ExcessMethod {
         }
     }
 
+    /// 与 `parse` 互逆的规范名（配置 / 报告接口用）。
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Arithmetic => "arithmetic",
+            Self::Geometric => "geometric",
+        }
+    }
+
     /// 组合单日超额收益。
     pub fn excess(&self, r: f64, b: f64) -> f64 {
         match self {
@@ -97,6 +105,21 @@ impl BenchmarkName {
             "cyi" => Self::Cyi,
             _ => return None,
         })
+    }
+
+    /// 与 `from_name` 互逆的规范名（配置 / 报告接口用）。
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Hs300 => "hs300",
+            Self::Zz500 => "zz500",
+            Self::Cyb => "cyb",
+            Self::Zz800 => "zz800",
+            Self::Zz1000 => "zz1000",
+            Self::Zz2000 => "zz2000",
+            Self::Sci => "sci",
+            Self::Kci => "kci",
+            Self::Cyi => "cyi",
+        }
     }
 
     /// 数据文件中的指数代码。

@@ -23,10 +23,15 @@
 │ src/bin/bt.rs（CLI：bt <config.yml>）        │
 │ examples/run_backtest.rs（规范"使用方法"示例） │
 ├─────────────────────────────────────────────┤
+│ 嵌入 API api：run / BtParams / BtOutput      │
+│ （高层便捷层：装配+回测+报告折叠为一个入口，    │
+│   参数类型化；CLI 组装复用此层）              │
+├─────────────────────────────────────────────┤
 │ Facade：load_signal / BTData / Backtest /    │
 │         BTResult / Report（规范公开接口）      │
 │ config：BtConfig（YAML 反序列化 + 默认值 +    │
-│         必填校验，供 CLI 组装上述 Facade）     │
+│         必填校验，经 to_params 转嵌入 API     │
+│         参数，供 CLI 组装）                   │
 ├──────────────┬──────────────┬───────────────┤
 │ 编排层        │ 领域层        │ 报表层         │
 │ backtest     │ strategy      │ report        │
@@ -53,7 +58,7 @@ rust-bt/
 ├── src/
 │   ├── lib.rs                  # 公开 re-export（load_signal, Signal, BTData, Account, Exchange,
 │   │                           #  Backtest, Strategy, TopkDropoutStrategy, BTResult, Report,
-│   │                           #  Decision, Order 等实现自定义策略所需类型）
+│   │                           #  Decision, Order 等实现自定义策略所需类型；api 层 run/BtParams 等）
 │   ├── error.rs                # BtError（thiserror 类型化错误，见 §8）
 │   ├── types.rs                # DayIdx、DealPrice、ExcessMethod、BenchmarkName、instrument 编解码、
 │   │                           #  TradableInfo/StockTradable（strategy 与 exchange 共用，见 §4.6）
@@ -76,9 +81,11 @@ rust-bt/
 │   │   └── topk_dropout.rs     # TopkDropoutStrategy
 │   ├── backtest.rs             # Backtest：主循环、两阶段撮合编排、延期校验、进度条与耗时
 │   ├── result.rs               # BTResult：hist_position / trades 导出、gen_report
-│   ├── config.rs               # BtConfig：YAML 配置（serde 默认值 + 必填校验），供 CLI 使用
+│   ├── api.rs                  # 嵌入 API（§4.10）：run / BtParams / StrategySpec / ExchangeParams /
+│   │                           #  BtOutput（export_all）/ signal_from_pairs 便捷构造
+│   ├── config.rs               # BtConfig：YAML 配置（serde 默认值 + 必填校验），经 to_params 供 CLI
 │   ├── bin/
-│   │   └── bt.rs               # CLI 入口（bt <config.yml>）：加载配置、组装 Facade、运行并导出
+│   │   └── bt.rs               # CLI 入口（bt <config.yml>）：加载配置与信号 -> api::run -> export_all
 │   └── report/
 │       ├── mod.rs              # Report：PortfolioMetrics、export_data、衍生指标
 │       └── html.rs             # HTML 报告：指标表 + 7 面板图（plotly CDN，路径由调用方指定）
@@ -161,9 +168,21 @@ pub struct Signal {
 pub struct SignalDay { pub codes: Vec<Code>, pub scores: Vec<f64> }  // 按 score 无序，策略自排序
 
 pub fn load_signal(path: &str) -> Result<Signal>;
+
+// 内存构造（嵌入方程序化生成信号；校验口径同 load_signal）
+impl SignalDay { pub fn from_pairs(pairs: Vec<(String, f64)>) -> Result<SignalDay>; }
+impl Signal {
+    pub fn from_days(days: BTreeMap<NaiveDate, SignalDay>) -> Signal;
+    pub fn dates(&self) -> impl Iterator<Item = NaiveDate> + '_;
+}
+// polars DataFrame 直连：load_signal = 读 CSV + 本函数（校验单点维护）
+pub fn signal_from_dataframe(df: &DataFrame) -> Result<Signal>;
 ```
 
 - `load_signal` 只做结构校验（重复键、score 缺失/NaN 丢弃 + warning）并剥离 `ret`。
+- `from_pairs` 口径一致：同日 instrument 重复报错；不可解析 / NaN score 丢弃 + warning。
+- `signal_from_dataframe` 与 `load_signal` 共用同一实现：必需 `datetime` / `instrument` /
+  `score` 列（cast 为 String/String/f64），多余列（含 `ret`）忽略剥离。
 - 日历/行情相关校验（datetime 不在日历、instrument 无行情）推迟到 `Backtest::run` 启动时执行（规范"数据校验"两阶段）。
 - 按日期建索引，主循环取 T−1 日信号为 O(log n) / O(1)。
 
@@ -385,12 +404,41 @@ pub struct Report { metrics: DataFrame /* export_data 逐 bar 表 */, derived: D
 impl Report {
     pub fn export_data(&self, path: &str) -> Result<()>;
     pub fn plot(&self, path: &str) -> Result<()>;   // HTML（调用方指定路径）：指标表 + 7 面板图，见 D10
+    pub fn summary(&self) -> String;                // 简报：关键指标文本（CLI 尾部输出 / 嵌入方日志）
 }
 ```
 
 `gen_report` 流程：基准名 → 映射表（不在表内 Err）→ 过滤该指数、剔除日历外行 → **覆盖校验**（必须覆盖回测全部交易日，否则 Err；区间内 benchmark 值缺失/NaN/inf 同样 Err）→ 与逐日记录 join → 计算 `return` / `turnover` / `cost` 等逐 bar 列（polars 向量化）→ 含/不含成本两条收益序列派生超额与累计净值 → 衍生指标（年化、波动、夏普、最大回撤、信息比率，ddof = 0）。导出边界完成 `code` → `instrument` 反映射与 `YYYY-MM-DD` 日期格式化。
 
 首日口径（规范"指标定义--补充定义"）：`r_0 = 0` -- 首日盈亏（含首日费用）不进入收益率与净值序列（净值期初恒为 1），仅体现在 `account` 列，并通过 `V_0` 的水平影响后续收益率分母；`excess_0 = −b_0` 不做特殊处理；年化公式中的 `n` 为区间交易日数（含首日）。`turnover` / `cost` 的分母为前一交易日总资产，区间首个有成交的交易日无前日，取期初资金 `initial_cash`。
+
+Report 另提供全部绘图序列的只读访问器（`dates` / `metrics` / `cum_with_cost` / `cum_without_cost` / `cum_benchmark` / `drawdown` / `drawdown_without` / `cum_excess` / `cum_excess_without` / `excess_drawdown` / `excess_drawdown_without` / `turnover`），供嵌入方程序化消费（不必落盘再读 CSV）。
+
+### 4.10 嵌入 API（api.rs）
+
+```rust
+pub struct BtParams {
+    pub stock_bar: String, pub benchmark: String,       // 行情/基准 CSV 路径（每次 run 重新加载）
+    pub start_date: String, pub end_date: String,
+    pub initial_cash: f64,
+    pub strategy: StrategySpec,                          // TopkDropout{..} 参数化或 Custom(Box<dyn Strategy>)
+    pub exchange: ExchangeParams,                        // deal_price: DealPrice 枚举，Default 对齐 CLI 默认
+    pub benchmark_name: BenchmarkName, pub excess_method: ExcessMethod,
+    pub progress: bool,
+}
+pub enum StrategySpec {
+    TopkDropout { top_n: usize, drop_n: usize, only_tradable: bool, forbid_st: bool },
+    Custom(Box<dyn Strategy>),
+}
+pub struct BtOutput { pub result: BTResult, pub report: Report }
+impl BtOutput { pub fn export_all(&self, dir: impl AsRef<Path>, names: &ExportNames) -> Result<()>; }
+
+pub fn run(params: BtParams, signal: &Signal) -> Result<BtOutput>;
+pub fn run_from_signal_file(params: BtParams, signal_path: &str) -> Result<BtOutput>;
+pub fn signal_from_pairs(days: BTreeMap<NaiveDate, Vec<(String, f64)>>) -> Result<Signal>;
+```
+
+`run` 内部流程与组件层等价：数值参数校验 -> 装配（`Exchange::new` 费用/阈值校验）-> 加载数据 -> 主循环 -> `gen_report`，校验先于数百 MB 行情加载（fail fast）。CLI（`bt.rs`）与示例共享该路径：`BtConfig::to_params()` 转类型化参数后调 `run`，消除双份装配逻辑。
 
 ---
 
@@ -410,6 +458,7 @@ impl Report {
 | D10 | 报告绘图：自包含 HTML（plotly.js basic bundle vendor 于 `assets/`、`include_str!` 内嵌，字符串模板手工拼 JSON）~~（原：plotters 直出 PNG，2026-08 取代）~~ | 交互式报告格式（7 面板：含/不含成本累计收益、两口径回撤、累计超额、换手率、两口径超额回撤 + 衍生指标表），可交互缩放/悬浮取值；手工拼 JSON 零新增 Rust 依赖、无前端构建；渲染为纯函数（`report/html.rs`）可无 fixture 直测。内嵌 basic bundle（仅 scatter/bar/pie，约 1.1MB）使单文件离线可开，代价为仓库/二进制/产物各 +1.1MB |
 | D11 | 错误分层：内部 `thiserror` 类型化 `BtError`，公开 API 返回 `anyhow::Result` | 与规范示例签名（`anyhow::Result`）一致；内部保留错误分类（数据校验/日历/非法参数/撮合）便于测试断言与调用方 downcast |
 | D12 | 进度条与耗时：`with_progress` 开关（默认关闭）+ indicatif 渲染 stderr；耗时记 `BTResult.elapsed`，进度条结束行显示 | 库默认零终端输出（测试、无终端、输出重定向环境干净）；总日数在区间对齐后即知，进度与 ETA 确定；禁用时 `Option<ProgressBar>` 为 None、`Instant` 计时开销可忽略，不触碰主循环热路径（每交易日一次 `inc`，重绘由 indicatif 节流） |
+| D13 | 双层公开 API：高层便捷层 `api::run`（类型化 `BtParams` -> `BtOutput`）与组件 Facade 并存；CLI 经 `BtConfig::to_params` 复用高层层 | 嵌入方一次调用完成装配+回测+报告，参数用枚举（`DealPrice`/`BenchmarkName`/`ExcessMethod`）编译期杜绝拼写错误（YAML 层只能加载期校验）；信号支持内存构造（`SignalDay::from_pairs`，校验口径同 `load_signal`）；两层共用同一撮合与估值路径（集成测试对拍逐日账户与逐笔成交完全相等），CLI/示例/嵌入不再各维护一份装配逻辑。数据复用（参数扫描免重载行情）留待组件层后续演进（如 `Arc<StockBarStore>`） |
 
 ---
 

@@ -85,6 +85,49 @@ bt config.yml          # 或 cargo run --release --bin bt -- config.yml
 - 报错：必填字段缺失时报错并指明字段名；`strategy.name` 目前仅接受 `topk_dropout`，其他值报错。
 - 输出：`output.dir` 目录（默认 `output/`，自动创建）下生成 hist_position / trades / report_data / report_plot 四个产物，文件名可配置。
 
+### 嵌入调用（api::run）
+
+嵌入其他 Rust 代码时优先用高层便捷入口 `run`（一次调用完成装配 + 回测 + 报告，
+参数全部类型化--`DealPrice` / `BenchmarkName` / `ExcessMethod` 为枚举，编译期杜绝拼写错误）：
+
+```rust
+use rust_bt::{run, signal_from_pairs, BtParams, ExchangeParams, StrategySpec};
+
+// 1. 参数（exchange 取默认值，与 CLI 默认一致）
+let params = BtParams {
+    stock_bar: "stock_bar.csv".into(),
+    benchmark: "benchmark.csv".into(),
+    start_date: "2026-01-01".into(),
+    end_date: "2026-06-01".into(),
+    initial_cash: 10_000_000.0,
+    strategy: StrategySpec::topk_dropout(100, 100),
+    exchange: ExchangeParams::default(),
+    benchmark_name: rust_bt::BenchmarkName::Zz1000,
+    excess_method: rust_bt::ExcessMethod::Arithmetic,
+    progress: false,
+};
+
+// 2. 信号：内存构造（研究循环程序化生成）、polars DataFrame 直连
+//    （signal_from_dataframe）或 load_signal(path) 读 CSV
+let signal = signal_from_pairs(days)?; // BTreeMap<NaiveDate, Vec<(instrument, score)>>
+
+// 3. 一次调用：装配 -> 加载数据 -> 主循环 -> 报告
+let output = run(params, &signal)?;
+
+// 4. 内存消费：衍生指标 / 逐日序列 / 逐笔成交
+let sharpe = output.report.derived.sharpe;
+let nav = output.report.cum_with_cost(); // &[f64]，其余序列见接口概要
+for t in output.result.trades() { /* ... */ }
+
+// 5. 可选：导出四产物（等价于组件层的四条 export 调用）
+output.export_all("output/", &rust_bt::ExportNames::default())?;
+```
+
+- 自定义策略：`StrategySpec::Custom(Box::new(MyStrategy::new(...)))` 注入（实现 `Strategy` trait）。
+- 信号从文件加载的等价快捷方式：`run_from_signal_file(params, "pred.csv")`。
+- 与组件 Facade 共用同一撮合与估值路径，口径一致；需要进度条之外的细粒度编排时直接用组件层。
+- `run` 每次调用重新加载行情 CSV；参数扫描等需复用数据的场景用组件层 Facade 自行装配。
+
 ---
 
 ## 接口概要
@@ -127,6 +170,48 @@ impl Report {
     // 累计超额（不含成本 / 含成本）、换手率、超额回撤（含成本）、超额回撤（不含成本）；
     // 收益类序列取净值−1、回撤取负值绘制，X 轴为交易日且首点补 T0 基准
     fn plot(&self, path: &str) -> anyhow::Result<()>;
+}
+
+// 报告序列只读访问器（嵌入方程序化消费，各序列与 dates() 等长）：
+// dates() -> &[NaiveDate]、metrics() -> &DataFrame（export_data 同构逐 bar 表）、
+// cum_with_cost / cum_without_cost / cum_benchmark / drawdown / drawdown_without /
+// cum_excess / cum_excess_without / excess_drawdown / excess_drawdown_without / turnover -> &[f64]
+impl Report {
+    fn dates(&self) -> &[chrono::NaiveDate];
+    fn cum_with_cost(&self) -> &[f64];
+    /* ...其余序列同名访问器... */
+    fn summary(&self) -> String; // 简报：区间/年化收益、波动、夏普、回撤、超额年化、信息比率、换手（双口径）
+}
+
+// ---- 嵌入 API（高层便捷层，见"使用方法--嵌入调用"） ----
+
+// 一次调用完成装配 + 回测 + 报告；参数类型化（枚举编译期校验），
+// 数值参数（initial_cash > 0、top_n >= 1 等）在数据加载前校验
+fn run(params: BtParams, signal: &Signal) -> anyhow::Result<BtOutput>;
+fn run_from_signal_file(params: BtParams, signal_path: &str) -> anyhow::Result<BtOutput>;
+
+// 参数：StrategySpec 为 TopkDropout{top_n, drop_n, only_tradable, forbid_st} 或
+// Custom(Box<dyn Strategy>)；ExchangeParams 默认值与 CLI 一致
+fn signal_from_pairs(days: BTreeMap<NaiveDate, Vec<(String, f64)>>) -> anyhow::Result<Signal>;
+
+// 内存信号构造（口径同 load_signal：同日重复报错、不可解析/NaN 丢弃 + warning）
+impl SignalDay {
+    fn from_pairs(pairs: Vec<(String, f64)>) -> anyhow::Result<SignalDay>;
+}
+impl Signal {
+    fn from_days(days: BTreeMap<NaiveDate, SignalDay>) -> Signal;
+    fn dates(&self) -> impl Iterator<Item = NaiveDate>; // 全部信号日（升序）
+}
+
+// polars DataFrame 直连：必需 datetime/instrument/score 列（多余列含 ret 忽略剥离），
+// load_signal = 读 CSV + 本函数（校验单点维护）
+fn signal_from_dataframe(df: &polars::prelude::DataFrame) -> anyhow::Result<Signal>;
+
+// 输出：result 为组件层 BTResult（daily/trades/hist_positions/elapsed），
+// report 为组件层 Report（derived + 序列访问器）；export_all 写四产物
+// （目录自动创建，文件名 ExportNames 可定制，默认 hist_position.csv 等）
+impl BtOutput {
+    fn export_all(&self, dir: impl AsRef<Path>, names: &ExportNames) -> anyhow::Result<()>;
 }
 ```
 

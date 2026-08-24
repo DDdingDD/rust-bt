@@ -197,6 +197,7 @@ impl BTResult {
             self.daily_dates(),
             self.initial_cash,
             method,
+            name,
         ))
     }
 

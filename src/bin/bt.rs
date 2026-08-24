@@ -1,9 +1,8 @@
 //! `bt <config.yml>`：YAML 配置驱动的回测 CLI。
 //!
 //! 配置格式见仓库根目录 config.example.yml；除数据路径与回测区间外均有默认值
-//! （对齐 examples/run_backtest.rs）。
-
-use std::path::Path;
+//! （对齐 examples/run_backtest.rs）。装配与运行复用嵌入 API `api::run`，
+//! 本文件只负责配置加载、信号加载与产物导出。
 
 use rust_bt::*;
 
@@ -19,63 +18,28 @@ fn main() -> anyhow::Result<()> {
     env_logger::init();
 
     let cfg = BtConfig::load(&config_path)?;
+    // 枚举参数在 to_params 解析（加载期校验已过，fail fast 于行情加载前）
+    let params = cfg.to_params()?;
 
-    // 1. 账户 / 交易所 / 策略（Exchange::new 的费用 / 阈值校验先于数据加载执行，
-    //    参数错误时 fail fast，不必等数百 MB 行情加载完）
-    let account = Account::new(cfg.account.initial_cash);
-    let exchange = Exchange::new(
-        &cfg.exchange.deal_price,
-        cfg.exchange.open_cost,
-        cfg.exchange.close_cost,
-        cfg.exchange.min_cost,
-        cfg.exchange.fixed_slippage,
-        cfg.exchange.min_slippage_ratio,
-        cfg.exchange.volume_threshold,
-        cfg.exchange.limit_threshold,
-    )?;
-    let strategy: Box<dyn Strategy> = match cfg.strategy.name.as_str() {
-        "topk_dropout" => Box::new(
-            TopkDropoutStrategy::new(cfg.strategy.top_n, cfg.strategy.drop_n)
-                .with_only_tradable(cfg.strategy.only_tradable)
-                .with_forbid_st(cfg.strategy.forbid_st),
-        ),
-        // BtConfig::load 已校验，此处不可达
-        other => anyhow::bail!("未知策略: {other}"),
-    };
-
-    // 2. 加载信号
+    // 信号独立于 BtParams（嵌入方可用内存构造，CLI 从文件加载）
     let signal = load_signal(cfg.signal())?;
 
-    // 3. 加载行情与基准数据
-    let data = BTData::new()
-        .load_stock_bar(cfg.stock_bar())?
-        .load_benchmark(cfg.benchmark_data())?
-        .build()?;
+    let output = run(params, &signal)?;
 
-    // 4. 运行回测
-    let mut backtest = Backtest::new(data, account, exchange, strategy).with_progress(cfg.progress);
-    let bt_result = backtest.run(&signal, cfg.start_date(), cfg.end_date())?;
+    let names = ExportNames {
+        hist_position: cfg.output.hist_position.clone(),
+        trades: cfg.output.trades.clone(),
+        report_data: cfg.output.report_data.clone(),
+        report_plot: cfg.output.report_plot.clone(),
+    };
+    output.export_all(&cfg.output.dir, &names)?;
 
-    // 5. 输出结果
-    let out_dir = Path::new(&cfg.output.dir);
-    std::fs::create_dir_all(out_dir)?;
-    let out = |name: &str| out_dir.join(name).to_string_lossy().into_owned();
-    bt_result.export_hist_position(&out(&cfg.output.hist_position))?;
-    bt_result.export_trades(&out(&cfg.output.trades))?;
-    let report = bt_result.gen_report(&cfg.report.benchmark, &cfg.report.excess_method)?;
-    report.export_data(&out(&cfg.output.report_data))?;
-    report.plot(&out(&cfg.output.report_plot))?;
-
-    println!("回测耗时: {:.2?}", bt_result.elapsed());
+    println!("回测耗时: {:.2?}", output.result.elapsed());
     println!(
         "输出产物已写入 {}/（{} / {} / {} / {}）",
-        cfg.output.dir,
-        cfg.output.hist_position,
-        cfg.output.trades,
-        cfg.output.report_data,
-        cfg.output.report_plot
+        cfg.output.dir, names.hist_position, names.trades, names.report_data, names.report_plot
     );
-    println!("{:#?}", report.derived);
+    println!("\n{}", output.report.summary());
 
     Ok(())
 }

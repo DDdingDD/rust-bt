@@ -11,7 +11,7 @@ use polars::prelude::*;
 use crate::account::DailyRecord;
 use crate::error::Result;
 use crate::result::Col;
-use crate::types::ExcessMethod;
+use crate::types::{BenchmarkName, ExcessMethod};
 
 /// 年化交易日数（规范"指标定义"）。
 const TRADING_DAYS_PER_YEAR: f64 = 252.0;
@@ -46,6 +46,10 @@ pub struct Report {
     /// 衍生指标
     pub derived: DerivedStats,
     dates: Vec<NaiveDate>,
+    /// 报告基准名称（仅用于 summary / plot 展示，不进入导出表）
+    benchmark_name: BenchmarkName,
+    /// 超额收益口径（仅用于 summary / plot 展示）
+    excess_method: ExcessMethod,
     /// 累计净值（含成本，期初 1）
     cum_with_cost: Vec<f64>,
     /// 累计净值（不含成本口径，V' = V + 累计费用 近似）
@@ -76,6 +80,7 @@ impl Report {
         dates: Vec<NaiveDate>,
         initial_cash: f64,
         method: ExcessMethod,
+        benchmark_name: BenchmarkName,
     ) -> Self {
         let n = daily.len();
         debug_assert_eq!(n, bench.len());
@@ -197,6 +202,8 @@ impl Report {
             metrics,
             derived,
             dates,
+            benchmark_name,
+            excess_method: method,
             cum_with_cost,
             cum_without_cost,
             cum_benchmark,
@@ -208,6 +215,57 @@ impl Report {
             excess_drawdown_without,
             turnover,
         }
+    }
+
+    // ---- 序列只读访问器（嵌入方程序化消费；语义见各字段注释） ----
+
+    /// 逐 bar 交易日（与各序列等长）。
+    pub fn dates(&self) -> &[NaiveDate] {
+        &self.dates
+    }
+    /// export_data 逐 bar 指标表（account/return/turnover/cost/benchmark 等列）。
+    pub fn metrics(&self) -> &DataFrame {
+        &self.metrics
+    }
+    /// 累计净值（含成本，期初 1）。
+    pub fn cum_with_cost(&self) -> &[f64] {
+        &self.cum_with_cost
+    }
+    /// 累计净值（不含成本口径，V' = V + 累计费用 近似，期初 1）。
+    pub fn cum_without_cost(&self) -> &[f64] {
+        &self.cum_without_cost
+    }
+    /// 基准累计净值（期初 1）。
+    pub fn cum_benchmark(&self) -> &[f64] {
+        &self.cum_benchmark
+    }
+    /// 回撤序列（含成本净值，正值）。
+    pub fn drawdown(&self) -> &[f64] {
+        &self.drawdown
+    }
+    /// 回撤序列（不含成本净值，正值）。
+    pub fn drawdown_without(&self) -> &[f64] {
+        &self.drawdown_without
+    }
+    /// 累计超额净值（含成本口径超额复利）。
+    pub fn cum_excess(&self) -> &[f64] {
+        &self.cum_excess
+    }
+    /// 累计超额净值（不含成本口径超额复利）。
+    pub fn cum_excess_without(&self) -> &[f64] {
+        &self.cum_excess_without
+    }
+    /// 超额净值回撤（含成本口径，正值）。
+    pub fn excess_drawdown(&self) -> &[f64] {
+        &self.excess_drawdown
+    }
+    /// 超额净值回撤（不含成本口径，正值）。
+    pub fn excess_drawdown_without(&self) -> &[f64] {
+        &self.excess_drawdown_without
+    }
+    /// 双边换手率（日度）。
+    pub fn turnover(&self) -> &[f64] {
+        &self.turnover
     }
 
     /// 导出逐 bar 原始指标（规范"指标定义--export_data 输出"）。
@@ -242,6 +300,60 @@ impl Report {
         file.write_all(html::render_html(&curves, &self.derived).as_bytes())?;
         Ok(())
     }
+
+    /// 简报：关键指标文本（嵌入方日志 / 终端输出用；完整指标见 `derived` 与序列访问器）。
+    pub fn summary(&self) -> String {
+        let d = &self.derived;
+        let (first, last) = match (self.dates.first(), self.dates.last()) {
+            (Some(f), Some(l)) => (
+                f.format("%Y-%m-%d").to_string(),
+                l.format("%Y-%m-%d").to_string(),
+            ),
+            _ => ("-".into(), "-".into()),
+        };
+        let period_ret = self.cum_with_cost.last().unwrap_or(&1.0) - 1.0;
+        let period_ret_wo = self.cum_without_cost.last().unwrap_or(&1.0) - 1.0;
+        let avg_turnover = if self.turnover.is_empty() {
+            0.0
+        } else {
+            self.turnover.iter().sum::<f64>() / self.turnover.len() as f64
+        };
+
+        format!(
+            "回测区间: {first} ~ {last}（{} 个交易日，基准 {} / {}）\n\
+             区间收益率:  {}（含成本）/ {}（不含成本）\n\
+             年化收益率:  {}（含成本）/ {}（不含成本）\n\
+             年化波动率:  {}\n\
+             夏普比率:    {}\n\
+             最大回撤:    {}\n\
+             超额年化:    {}（含成本）/ {}（不含成本）\n\
+             信息比率:    {}（含成本）/ {}（不含成本）\n\
+             平均日换手率: {}",
+            self.dates.len(),
+            self.benchmark_name.as_str(),
+            self.excess_method.as_str(),
+            fmt_pct(period_ret),
+            fmt_pct(period_ret_wo),
+            fmt_pct(d.annualized_return),
+            fmt_pct(d.annualized_return_without_cost),
+            fmt_pct(d.annualized_volatility),
+            fmt_ratio(d.sharpe),
+            fmt_pct(d.max_drawdown),
+            fmt_pct(d.excess_annualized_return),
+            fmt_pct(d.excess_annualized_return_without_cost),
+            fmt_ratio(d.information_ratio),
+            fmt_ratio(d.information_ratio_without_cost),
+            fmt_pct(avg_turnover),
+        )
+    }
+}
+
+fn fmt_pct(v: f64) -> String {
+    format!("{:>8.2}%", v * 100.0)
+}
+
+fn fmt_ratio(v: f64) -> String {
+    format!("{:>8.2}", v)
 }
 
 /// 导出 CSV（hist_position / trades 共用）。
@@ -331,5 +443,58 @@ fn info_ratio(excess: &[f64]) -> f64 {
         0.0
     } else {
         mean(excess) / s * TRADING_DAYS_PER_YEAR.sqrt()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::NaiveDate;
+
+    fn fake_daily() -> Vec<DailyRecord> {
+        // 5 个交易日：T0 现金 100 万，T1 买入并稳定在 100 万（零成本），后续无交易
+        let mut out = Vec::new();
+        for i in 0..5 {
+            let account = 1_000_000.0;
+            out.push(DailyRecord {
+                day: i,
+                account,
+                value: account,
+                cash: 0.0,
+                turnover_amount: if i == 1 { 1_000_000.0 } else { 0.0 },
+                cost: 0.0,
+            });
+        }
+        out
+    }
+
+    fn dates() -> Vec<NaiveDate> {
+        (1..=5)
+            .map(|d| NaiveDate::from_ymd_opt(2026, 1, d).unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn summary_contains_key_metrics() {
+        let daily = fake_daily();
+        let bench = vec![0.0f64; daily.len()];
+        let report = Report::build(
+            &daily,
+            &bench,
+            dates(),
+            1_000_000.0,
+            ExcessMethod::Arithmetic,
+            BenchmarkName::Zz1000,
+        );
+
+        let s = report.summary();
+        assert!(s.contains("2026-01-01"), "{s}");
+        assert!(s.contains("2026-01-05"), "{s}");
+        assert!(s.contains("zz1000"), "{s}");
+        assert!(s.contains("arithmetic"), "{s}");
+        assert!(s.contains("年化收益率"), "{s}");
+        assert!(s.contains("最大回撤"), "{s}");
+        assert!(s.contains("信息比率"), "{s}");
+        assert!(s.contains("平均日换手率"), "{s}");
     }
 }

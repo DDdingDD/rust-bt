@@ -96,6 +96,47 @@ impl BtConfig {
     pub fn end_date(&self) -> &str {
         self.period.end_date.as_deref().expect("load 已校验")
     }
+
+    /// 转为嵌入 API 参数（CLI 组装用）。字符串枚举在此解析为类型化枚举；
+    /// `load`/`validate` 已做过同等校验，错误分支实际不可达，仍带上下文透出。
+    pub fn to_params(&self) -> anyhow::Result<crate::api::BtParams> {
+        use crate::api::{BtParams, ExchangeParams, StrategySpec};
+        use crate::types::{BenchmarkName, DealPrice, ExcessMethod};
+
+        let strategy = match self.strategy.name.as_str() {
+            "topk_dropout" => StrategySpec::TopkDropout {
+                top_n: self.strategy.top_n,
+                drop_n: self.strategy.drop_n,
+                only_tradable: self.strategy.only_tradable,
+                forbid_st: self.strategy.forbid_st,
+            },
+            other => anyhow::bail!("未知策略: {other}"),
+        };
+        Ok(BtParams {
+            stock_bar: self.stock_bar().to_owned(),
+            benchmark: self.benchmark_data().to_owned(),
+            start_date: self.start_date().to_owned(),
+            end_date: self.end_date().to_owned(),
+            initial_cash: self.account.initial_cash,
+            strategy,
+            exchange: ExchangeParams {
+                deal_price: DealPrice::parse(&self.exchange.deal_price)
+                    .map_err(|e| anyhow!("exchange.deal_price 非法: {e}"))?,
+                open_cost: self.exchange.open_cost,
+                close_cost: self.exchange.close_cost,
+                min_cost: self.exchange.min_cost,
+                fixed_slippage: self.exchange.fixed_slippage,
+                min_slippage_ratio: self.exchange.min_slippage_ratio,
+                volume_threshold: self.exchange.volume_threshold,
+                limit_threshold: self.exchange.limit_threshold,
+            },
+            benchmark_name: BenchmarkName::from_name(&self.report.benchmark)
+                .ok_or_else(|| anyhow!("report.benchmark 未知基准名称: {}", self.report.benchmark))?,
+            excess_method: ExcessMethod::parse(&self.report.excess_method)
+                .map_err(|e| anyhow!("report.excess_method 非法: {e}"))?,
+            progress: self.progress,
+        })
+    }
 }
 
 impl Default for BtConfig {
