@@ -63,7 +63,8 @@ rust-bt/
 │   ├── types.rs                # DayIdx、DealPrice、ExcessMethod、BenchmarkName、instrument 编解码、
 │   │                           #  TradableInfo/StockTradable（strategy 与 exchange 共用，见 §4.6）
 │   ├── data/
-│   │   ├── mod.rs              # BTData 构建器（new/load_stock_bar/load_benchmark/build）
+│   │   ├── mod.rs              # BTData 构建器（new/load_stock_bar/load_benchmark/build）+
+│   │   │                       #  read_dataframe（CSV/parquet 按扩展名分发）、date_strings（类型化日期统一转 YYYY-MM-DD）
 │   │   ├── calendar.rs         # TradingCalendar：交易日序列、区间对齐与校验
 │   │   ├── stock_bar.rs        # stock_bar 加载、结构校验、StockBarStore（排序帧 + 日偏移索引）
 │   │   └── benchmark.rs        # benchmark 加载与校验（重复键、结构）
@@ -150,7 +151,7 @@ pub struct StockBarStore {
 pub struct BTData { /* stock_bar: StockBarStore, benchmark: DataFrame, calendar: TradingCalendar */ }
 impl BTData {
     pub fn new() -> Self;
-    pub fn load_stock_bar(self, path: &str) -> Result<Self>;   // 结构校验（见规范校验表）
+    pub fn load_stock_bar(self, path: &str) -> Result<Self>;   // 结构校验（见规范校验表）；CSV/parquet 按扩展名识别
     pub fn load_benchmark(self, path: &str) -> Result<Self>;
     pub fn build(self) -> Result<Self>;                        // 统一校验 + 构建交易日历 + 日索引
 }
@@ -158,6 +159,7 @@ impl BTData {
 
 - 日历 = stock_bar 去重排序后的全部 `datetime`（规范"交易日历"）。
 - 加载边界完成：`instrument` → `code` 编码、必需列存在性、重复键、价格/factor 合法性校验。`paused`/`is_st` 缺失按 0 处理并 warning。非错误类行级规则（停牌、无量、deal_price 列无效）不在加载期剔除，而是体现在撮合期可交易性判断。
+- 输入格式：`data::read_dataframe` 按扩展名分发（`.parquet`/`.pq` -> ParquetReader，其余 -> CSV），两种格式共用同一套列校验；parquet 的类型化 `datetime`（`Date`/`Datetime`）经 `data::date_strings` 统一截断到日、转 `YYYY-MM-DD` 字符串（规范"数据文件格式"）。
 
 ### 4.3 Signal
 
@@ -487,7 +489,7 @@ pub enum BtError {
 
 | crate | 用途 |
 | --- | --- |
-| polars（features: csv, lazy, dtype-date） | 数据加载、校验、join、报表指标向量化计算 |
+| polars（features: csv, parquet, temporal） | 数据加载（CSV/parquet）、校验、join、报表指标向量化计算；temporal 支撑 parquet 类型化日期列转换 |
 | chrono | `NaiveDate`，`YYYY-MM-DD` 解析/格式化 |
 | thiserror / anyhow | 错误分层（见 D11） |
 | log | warning 通道（D9） |

@@ -9,7 +9,7 @@ name = "bt"
 path = "src/bin/bt.rs"
 
 [dependencies]
-polars = { version = "0.44", default-features = false, features = ["csv"] }
+polars = { version = "0.44", default-features = false, features = ["csv", "parquet", "temporal"] }
 chrono = { version = "0.4", default-features = false, features = ["std", "alloc"] }
 thiserror = "2"
 anyhow = "1"

@@ -6,10 +6,10 @@
 # 信号 CSV 路径（必填）
 signal: "tmp_data/pred.csv"
 
-# 行情数据路径（必填）
+# 行情数据路径（必填）：CSV 或 parquet（按扩展名 .parquet / .pq 识别，列要求同 CSV）
 data:
-  stock_bar: "tmp_data/stock_bar.csv" # 股票日行情 CSV
-  benchmark: "tmp_data/benchmark.csv" # 基准收益 CSV
+  stock_bar: "tmp_data/stock_bar.csv" # 股票日行情
+  benchmark: "tmp_data/benchmark.csv" # 基准收益
 
 # 回测区间（必填）：闭开区间 [start_date, end_date)，自动按交易日历对齐
 period:

@@ -5,7 +5,8 @@
 
 > 行为口径的唯一权威是 [`doc/specification.md`](specification.md)（设计规范）；
 > 本文是其嵌入视角的使用文档，类型与模块设计见 [`doc/architecture.md`](architecture.md) §4.10 / D13。
-> 数据文件格式（stock_bar / benchmark / pred CSV）的字段定义见规范"数据文件格式"一节。
+> 数据文件格式（stock_bar / benchmark / pred）的字段定义见规范"数据文件格式"一节；
+> 其中 stock_bar 与 benchmark 支持 CSV 与 parquet（按扩展名识别，见 §4.1 与规范同节）。
 
 ---
 
@@ -51,8 +52,8 @@ fn main() -> anyhow::Result<()> {
     env_logger::init();
 
     let params = BtParams {
-        stock_bar: "tmp_data/stock_bar.csv".into(),   // 股票日行情（交易日历来源）
-        benchmark: "tmp_data/benchmark.csv".into(),   // 基准收益（报告必需）
+        stock_bar: "tmp_data/stock_bar.csv".into(),   // 股票日行情（交易日历来源；CSV 或 parquet）
+        benchmark: "tmp_data/benchmark.csv".into(),   // 基准收益（报告必需；CSV 或 parquet）
         start_date: "2026-01-01".into(),              // 区间 [start, end)，按交易日历自动对齐
         end_date: "2026-06-01".into(),
         initial_cash: 10_000_000.0,                   // 期初资金
@@ -96,7 +97,7 @@ fn main() -> anyhow::Result<()> {
 ### 便捷入口内部流程（与组件层等价）
 
 数值参数校验（`initial_cash > 0`、`top_n >= 1` 等，`Err` 类型 `BtError::InvalidParam`）
--> 装配（`Exchange::new` 费用/阈值校验）-> 加载行情与基准 CSV -> 主循环 ->
+-> 装配（`Exchange::new` 费用/阈值校验）-> 加载行情与基准（CSV / parquet，按扩展名识别）-> 主循环 ->
 `gen_report`（基准覆盖校验）。**校验先于数百 MB 行情加载**（参数错误 fail fast）。
 
 ## 4. 参数详解 BtParams
@@ -105,8 +106,8 @@ fn main() -> anyhow::Result<()> {
 
 | 字段 | 类型 | 约束 / 说明 |
 | --- | --- | --- |
-| `stock_bar` | `String` | 股票日行情 CSV 路径；交易日历由其中全部 `datetime` 去重排序构成 |
-| `benchmark` | `String` | 基准收益 CSV 路径；一个文件可含多个指数，报告按 `benchmark_name` 选定 |
+| `stock_bar` | `String` | 股票日行情路径（CSV 或 parquet，按扩展名识别）；交易日历由其中全部 `datetime` 去重排序构成 |
+| `benchmark` | `String` | 基准收益路径（CSV 或 parquet，同上）；一个文件可含多个指数，报告按 `benchmark_name` 选定 |
 | `start_date` / `end_date` | `String` | `YYYY-MM-DD`；闭开区间 `[start, end)`，按交易日历自动对齐 |
 | `initial_cash` | `f64` | 期初资金，须为正的有限值 |
 | `strategy` | `StrategySpec` | 见 §4.3 与 §8 |
@@ -406,7 +407,7 @@ StockTradable {
 | `Calendar(String)` | 区间对齐失败（start ≥ end、区间内无交易日）、日期格式非法 |
 | `BenchmarkCoverage(String)` | 基准未覆盖回测区间全部交易日 |
 | `InvalidDecision(String)` | 策略决策非法（同股同时买 + 卖） |
-| `Polars(..)` / `Io(..)` | CSV 解析 / 文件 IO 错误 |
+| `Polars(..)` / `Io(..)` | CSV / parquet 解析、文件 IO 错误 |
 
 参数类错误（`InvalidParam` / `Validation` 的参数部分）发生在行情加载**之前**。
 
@@ -475,8 +476,9 @@ fn sweep(signal: &rust_bt::Signal, paths_stock: &str, paths_bench: &str) -> rust
 }
 ```
 
-> 每次调用 `run` 重新加载行情 CSV（当前无跨 `run` 的数据复用；架构 D13 记录了
-> 后续 `Arc` 共享行情的演进方向）。数据量大、组合数多时请把加载耗时计入预算。
+> 每次调用 `run` 重新加载行情数据文件（当前无跨 `run` 的数据复用；架构 D13 记录了
+> 后续 `Arc` 共享行情的演进方向）。数据量大、组合数多时请把加载耗时计入预算；
+> parquet 体积与解析开销通常显著低于同内容 CSV，大数据集建议优先使用。
 
 ### 示例 3：基于序列计算自定义指标（卡玛比率 + 平均换手）
 

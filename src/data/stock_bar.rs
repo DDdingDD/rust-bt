@@ -13,6 +13,7 @@ use chrono::NaiveDate;
 use polars::prelude::*;
 
 use crate::data::calendar::{parse_date, TradingCalendar};
+use crate::data::{date_strings, read_dataframe};
 use crate::error::{BtError, Result};
 use crate::types::{parse_instrument, Code, DayIdx};
 
@@ -68,12 +69,9 @@ impl StockBarStore {
         (start as usize)..((start + len) as usize)
     }
 
-    /// 加载并校验 stock_bar.csv。
+    /// 加载并校验 stock_bar（CSV 或 parquet，按扩展名识别）。
     pub fn load(path: &Path) -> Result<Self> {
-        let df = CsvReadOptions::default()
-            .with_has_header(true)
-            .try_into_reader_with_file_path(Some(path.to_path_buf()))?
-            .finish()?;
+        let df = read_dataframe(path)?;
 
         // 必需列存在性
         for name in REQUIRED_COLUMNS {
@@ -83,7 +81,7 @@ impl StockBarStore {
         }
 
         let n = df.height();
-        let raw_dates = str_column(&df, "datetime")?;
+        let raw_dates = date_strings(&df, "datetime")?;
         let raw_instruments = str_column(&df, "instrument")?;
         let mut open = f64_column(&df, "open")?;
         let mut close = f64_column(&df, "close")?;
@@ -261,7 +259,7 @@ impl StockBarStore {
     }
 }
 
-/// 读取字符串列；非 String 类型先尝试 cast（如 Date -> String）。
+/// 读取字符串列；非 String 类型先尝试 cast（如 parquet 的类型化列）。
 fn str_column(df: &DataFrame, name: &str) -> Result<Vec<String>> {
     let col = df
         .column(name)
@@ -296,4 +294,61 @@ fn f64_column(df: &DataFrame, name: &str) -> Result<Vec<f64>> {
         .f64()
         .map_err(|e| BtError::Validation(format!("列 {name} 非数值类型: {e}")))?;
     Ok(ca.iter().map(|o| o.unwrap_or(f64::NAN)).collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// parquet 加载：类型化列（Date 日期、Boolean paused/is_st）与 CSV 口径一致。
+    #[test]
+    fn load_parquet_typed_columns() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("stock_bar.parquet");
+
+        let f = |name: &str, vals: Vec<f64>| Series::new(name.into(), vals);
+        let datetime = Series::new(
+            "datetime".into(),
+            vec!["2026-01-05", "2026-01-05", "2026-01-06", "2026-01-06"],
+        )
+        .cast(&DataType::Date)
+        .unwrap();
+        let mut df = DataFrame::new(vec![
+            datetime.into(),
+            Series::new(
+                "instrument".into(),
+                vec!["SH600001", "SZ000001", "SH600001", "SZ000001"],
+            )
+            .into(),
+            f("open", vec![10.0, 20.0, 10.5, 20.0]).into(),
+            f("close", vec![10.5, 20.0, 11.0, 19.0]).into(),
+            f("low", vec![9.5, 19.0, 10.0, 18.5]).into(),
+            f("high", vec![11.0, 21.0, 11.5, 20.5]).into(),
+            f("volume", vec![100.0, 200.0, 100.0, 200.0]).into(),
+            f("money", vec![1050.0, 4000.0, 1100.0, 3800.0]).into(),
+            f("factor", vec![1.0, 1.0, 1.0, 1.0]).into(),
+            f("high_limit", vec![11.0, 22.0, 11.5, 21.0]).into(),
+            f("low_limit", vec![9.0, 18.0, 9.5, 18.0]).into(),
+            f("pre_close", vec![10.0, 20.0, 10.5, 20.0]).into(),
+            Series::new("paused".into(), vec![false, true, false, false]).into(),
+            Series::new("is_st".into(), vec![false, false, true, false]).into(),
+            f("vwap", vec![10.2, 20.0, 10.8, 19.5]).into(),
+        ])
+        .unwrap();
+        let file = std::fs::File::create(&path).unwrap();
+        ParquetWriter::new(file).finish(&mut df).unwrap();
+
+        let store = StockBarStore::load(&path).unwrap();
+        // 排序后 (DayIdx, Code)：SZ000001(1) < SH600001(600001)
+        assert_eq!(store.codes, vec![1, 600001, 1, 600001]);
+        assert_eq!(store.open, vec![20.0, 10.0, 20.0, 10.5]);
+        assert_eq!(store.close, vec![20.0, 10.5, 19.0, 11.0]);
+        assert_eq!(store.paused, vec![true, false, false, false]);
+        assert_eq!(store.is_st, vec![false, false, false, true]);
+        assert_eq!(store.calendar.len(), 2);
+        assert_eq!(store.calendar.date(0).to_string(), "2026-01-05");
+        assert_eq!(store.calendar.date(1).to_string(), "2026-01-06");
+        assert_eq!(store.day_range(0), 0..2);
+        assert_eq!(store.day_range(1), 2..4);
+    }
 }

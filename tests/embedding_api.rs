@@ -101,32 +101,6 @@ fn in_memory_signal() -> rust_bt::Signal {
     api::signal_from_pairs(days).unwrap()
 }
 
-/// 逐日账户逐字段对拍（DailyRecord 未派生 PartialEq，按字段比）。
-fn assert_daily_same(a: &rust_bt::BTResult, b: &rust_bt::BTResult) {
-    assert_eq!(a.daily().len(), b.daily().len(), "daily 天数");
-    for (x, y) in a.daily().iter().zip(b.daily()) {
-        assert_eq!(x.day, y.day);
-        assert_f64(x.account, y.account, "account");
-        assert_f64(x.value, y.value, "value");
-        assert_f64(x.cash, y.cash, "cash");
-        assert_f64(x.turnover_amount, y.turnover_amount, "turnover_amount");
-        assert_f64(x.cost, y.cost, "cost");
-    }
-}
-
-/// 逐笔成交逐字段对拍。
-fn assert_trades_same(a: &rust_bt::BTResult, b: &rust_bt::BTResult) {
-    assert_eq!(a.trades().len(), b.trades().len(), "trades 笔数");
-    for (x, y) in a.trades().iter().zip(b.trades()) {
-        assert_eq!(x.day, y.day);
-        assert_eq!(x.stock, y.stock);
-        assert_eq!(x.side, y.side);
-        assert_f64(x.deal_volume, y.deal_volume, "deal_volume");
-        assert_f64(x.deal_price, y.deal_price, "deal_price");
-        assert_f64(x.deal_cost, y.deal_cost, "deal_cost");
-    }
-}
-
 #[test]
 fn in_memory_signal_run_matches_component_layer() {
     let (dir, params) = setup(true);

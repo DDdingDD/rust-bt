@@ -126,7 +126,7 @@ output.export_all("output/", &rust_bt::ExportNames::default())?;
 - 自定义策略：`StrategySpec::Custom(Box::new(MyStrategy::new(...)))` 注入（实现 `Strategy` trait）。
 - 信号从文件加载的等价快捷方式：`run_from_signal_file(params, "pred.csv")`。
 - 与组件 Facade 共用同一撮合与估值路径，口径一致；需要进度条之外的细粒度编排时直接用组件层。
-- `run` 每次调用重新加载行情 CSV；参数扫描等需复用数据的场景用组件层 Facade 自行装配。
+- `run` 每次调用重新加载数据文件；参数扫描等需复用数据的场景用组件层 Facade 自行装配。
 
 ---
 
@@ -139,7 +139,7 @@ output.export_all("output/", &rust_bt::ExportNames::default())?;
 // 日历/行情相关校验（datetime 不在交易日历、instrument 无行情）依赖交易日历，推迟到 Backtest::run 启动时执行
 fn load_signal(path: &str) -> anyhow::Result<Signal>;
 
-// 数据容器：加载行情与基准，build 时统一校验并构建交易日历
+// 数据容器：加载行情与基准（CSV / parquet 按扩展名识别，见"数据文件格式"），build 时统一校验并构建交易日历
 impl BTData {
     fn new() -> Self;
     fn load_stock_bar(self, path: &str) -> anyhow::Result<Self>;
@@ -561,6 +561,8 @@ cost_price /= factor_ratio                  // 除权导致成本价降低
 ---
 
 ## 数据文件格式
+
+输入文件支持两种物理格式：CSV 与 parquet。`stock_bar` 与 `benchmark` 按文件扩展名自动识别（`.parquet` / `.pq` 走 parquet，其余含无扩展名一律按 CSV），列要求与校验两种格式完全一致，下述字段定义对两者通用。`pred` 信号文件仅支持 CSV（内存构造与 DataFrame 直连见"使用方法"）。parquet 中的类型化列做如下兼容：`datetime` 可为字符串或 `Date` / `Datetime` 类型（后者截断到日，时间部分丢弃）；数值列类型不限，加载时统一转 f64（`paused` / `is_st` 可为布尔或数值，布尔按 1/0 口径）。
 
 ### 代码规范（instrument）
 

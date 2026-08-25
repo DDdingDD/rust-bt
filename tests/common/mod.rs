@@ -212,6 +212,32 @@ pub fn assert_f64(actual: f64, expected: f64, what: &str) {
     );
 }
 
+/// 两个回测结果的逐日账户对拍（DailyRecord 未派生 PartialEq，按字段比）。
+pub fn assert_daily_same(a: &BTResult, b: &BTResult) {
+    assert_eq!(a.daily().len(), b.daily().len(), "daily 天数");
+    for (x, y) in a.daily().iter().zip(b.daily()) {
+        assert_eq!(x.day, y.day, "daily day");
+        assert_f64(x.account, y.account, "account");
+        assert_f64(x.value, y.value, "value");
+        assert_f64(x.cash, y.cash, "cash");
+        assert_f64(x.turnover_amount, y.turnover_amount, "turnover_amount");
+        assert_f64(x.cost, y.cost, "cost");
+    }
+}
+
+/// 两个回测结果的逐笔成交对拍。
+pub fn assert_trades_same(a: &BTResult, b: &BTResult) {
+    assert_eq!(a.trades().len(), b.trades().len(), "trades 笔数");
+    for (x, y) in a.trades().iter().zip(b.trades()) {
+        assert_eq!(x.day, y.day, "trade day");
+        assert_eq!(x.stock, y.stock, "trade instrument");
+        assert_eq!(x.side, y.side, "trade side");
+        assert_f64(x.deal_volume, y.deal_volume, "deal_volume");
+        assert_f64(x.deal_price, y.deal_price, "deal_price");
+        assert_f64(x.deal_cost, y.deal_cost, "deal_cost");
+    }
+}
+
 /// 逐笔成交对拍。
 #[allow(clippy::too_many_arguments)]
 pub fn check_trade(

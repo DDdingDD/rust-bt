@@ -10,6 +10,7 @@ use chrono::NaiveDate;
 use polars::prelude::*;
 
 use crate::data::calendar::parse_date;
+use crate::data::{date_strings, read_dataframe};
 use crate::error::{BtError, Result};
 
 /// benchmark 存储：原始行（覆盖校验在 gen_report 选定基准后进行）。
@@ -20,12 +21,9 @@ pub struct BenchmarkStore {
 }
 
 impl BenchmarkStore {
-    /// 加载并做结构校验：必需列、(datetime, instrument) 重复。
+    /// 加载并做结构校验（CSV 或 parquet，按扩展名识别）：必需列、(datetime, instrument) 重复。
     pub fn load(path: &Path) -> Result<Self> {
-        let df = CsvReadOptions::default()
-            .with_has_header(true)
-            .try_into_reader_with_file_path(Some(path.to_path_buf()))?
-            .finish()?;
+        let df = read_dataframe(path)?;
 
         for name in ["datetime", "instrument", "benchmark"] {
             if df.column(name).is_err() {
@@ -33,14 +31,7 @@ impl BenchmarkStore {
             }
         }
 
-        let raw_dates = df
-            .column("datetime")?
-            .cast(&DataType::String)?
-            .str()?
-            .iter()
-            .map(|o| o.map(str::to_owned))
-            .collect::<Option<Vec<_>>>()
-            .ok_or_else(|| BtError::Validation("benchmark datetime 存在缺失".into()))?;
+        let raw_dates = date_strings(&df, "datetime")?;
         let instruments = df
             .column("instrument")?
             .cast(&DataType::String)?
@@ -88,5 +79,59 @@ impl BenchmarkStore {
             .filter(|((_, i), _)| i.as_str() == instrument)
             .map(|((d, _), v)| (*d, *v))
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// parquet 加载：datetime 为 Datetime 类型（pandas datetime64[ns] 常见形态），
+    /// 时间部分截断到日后与 CSV 口径一致。
+    #[test]
+    fn load_parquet_datetime_typed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("benchmark.parquet");
+
+        let ns = |d: &str| {
+            NaiveDate::parse_from_str(d, "%Y-%m-%d")
+                .unwrap()
+                .and_hms_opt(12, 30, 0) // 带时间，验证截断
+                .unwrap()
+                .and_utc()
+                .timestamp_nanos_opt()
+                .unwrap()
+        };
+        let datetime = Series::new(
+            "datetime".into(),
+            vec![ns("2026-01-05"), ns("2026-01-05"), ns("2026-01-06")],
+        )
+        .cast(&DataType::Datetime(TimeUnit::Nanoseconds, None))
+        .unwrap();
+        let mut df = DataFrame::new(vec![
+            datetime.into(),
+            Series::new("instrument".into(), vec!["SH000852", "SH000300", "SH000852"]).into(),
+            Series::new("benchmark".into(), vec![0.001, 0.002, -0.003]).into(),
+        ])
+        .unwrap();
+        let file = std::fs::File::create(&path).unwrap();
+        ParquetWriter::new(file).finish(&mut df).unwrap();
+
+        let store = BenchmarkStore::load(&path).unwrap();
+        assert_eq!(
+            store.instruments,
+            vec!["SH000852", "SH000300", "SH000852"]
+        );
+        assert_eq!(store.values, vec![0.001, 0.002, -0.003]);
+        let series = store.series_for("SH000852");
+        assert_eq!(series.len(), 2);
+        assert_eq!(
+            series.get(&NaiveDate::from_ymd_opt(2026, 1, 5).unwrap()),
+            Some(&0.001)
+        );
+        assert_eq!(
+            series.get(&NaiveDate::from_ymd_opt(2026, 1, 6).unwrap()),
+            Some(&-0.003)
+        );
     }
 }
