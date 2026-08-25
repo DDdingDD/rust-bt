@@ -10,6 +10,8 @@ signal: "tmp_data/pred.csv"
 data:
   stock_bar: "tmp_data/stock_bar.csv" # 股票日行情
   benchmark: "tmp_data/benchmark.csv" # 基准收益
+  # wap: "tmp_data/wap.parquet"       # wap 时段数据：deal_price 为 vwapN/twapN 时必填
+                                      # 时段表见 doc/specification.md "数据文件格式--wap 数据"
 
 # 回测区间（必填）：闭开区间 [start_date, end_date)，自动按交易日历对齐
 period:
@@ -30,7 +32,8 @@ strategy:
 
 # 交易所（撮合与成本）
 exchange:
-  deal_price: "open"                 # 成交价：open / close / vwap
+  deal_price: "open"                 # 成交价：open / close / vwap / vwapN / twapN
+                                     # （N = 1..=11 时段价，需 data.wap；时段表见 doc/specification.md）
   open_cost: 0.00015                 # 买入费率（万 1.5）
   close_cost: 0.00065                # 卖出费率（佣金 + 印花税，万 6.5）
   min_cost: 5.0                      # 单笔最低费用

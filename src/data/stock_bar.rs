@@ -260,7 +260,7 @@ impl StockBarStore {
 }
 
 /// 读取字符串列；非 String 类型先尝试 cast（如 parquet 的类型化列）。
-fn str_column(df: &DataFrame, name: &str) -> Result<Vec<String>> {
+pub(crate) fn str_column(df: &DataFrame, name: &str) -> Result<Vec<String>> {
     let col = df
         .column(name)
         .map_err(|_| BtError::Validation(format!("缺少列: {name}")))?;
@@ -283,7 +283,7 @@ fn str_column(df: &DataFrame, name: &str) -> Result<Vec<String>> {
 }
 
 /// 读取数值列（统一 cast 到 f64；缺失 -> NaN）。
-fn f64_column(df: &DataFrame, name: &str) -> Result<Vec<f64>> {
+pub(crate) fn f64_column(df: &DataFrame, name: &str) -> Result<Vec<f64>> {
     let col = df
         .column(name)
         .map_err(|_| BtError::Validation(format!("缺少列: {name}")))?;

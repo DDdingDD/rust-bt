@@ -33,7 +33,7 @@ fn smoke_tmp_data() {
     )
     .unwrap();
     let strategy: Box<dyn Strategy> = Box::new(TopkDropoutStrategy::new(100, 100));
-    let mut bt = Backtest::new(data, account, exchange, strategy);
+    let mut bt = Backtest::new(data, account, exchange, strategy).unwrap();
     // pred.csv 自 2022-10-10 起；取一个月区间控制耗时
     let result = bt.run(&signal, "2022-10-10", "2022-11-01").unwrap();
 

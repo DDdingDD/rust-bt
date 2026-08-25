@@ -33,21 +33,25 @@ pub struct Backtest {
 
 impl Backtest {
     /// 装配：exchange 注入行情（按 deal_price 预计算 limit 列）。
+    ///
+    /// 装配期校验 wap 数据与 deal_price 匹配（vwapN/twapN 必须提供对应时段的 wap
+    /// 数据），不匹配返回 `Err`。
     pub fn new(
         data: crate::data::BTData,
         account: Account,
         mut exchange: Exchange,
         strategy: Box<dyn Strategy>,
-    ) -> Self {
+    ) -> Result<Self> {
         let crate::data::BTData {
             stock_bar,
             benchmark,
+            wap,
         } = data;
         let stock_bar = stock_bar.expect("BTData::build 已校验 stock_bar 存在");
         let calendar = stock_bar.calendar.clone();
-        exchange.inject_market(stock_bar);
+        exchange.inject_market(stock_bar, wap)?;
         let initial_cash = account.cash();
-        Self {
+        Ok(Self {
             calendar,
             benchmark,
             account,
@@ -56,7 +60,7 @@ impl Backtest {
             initial_cash,
             progress: false,
             has_run: false,
-        }
+        })
     }
 
     /// 进度条开关（默认关闭）：启用后 run 期间向 stderr 渲染按交易日推进的进度条，

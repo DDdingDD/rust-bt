@@ -67,6 +67,7 @@ rust-bt/
 │   │   │                       #  read_dataframe（CSV/parquet 按扩展名分发）、date_strings（类型化日期统一转 YYYY-MM-DD）
 │   │   ├── calendar.rs         # TradingCalendar：交易日序列、区间对齐与校验
 │   │   ├── stock_bar.rs        # stock_bar 加载、结构校验、StockBarStore（排序帧 + 日偏移索引）
+│   │   ├── wap.rs              # wap 时段数据加载、校验、WapStore（vwapN/twapN 方向价/量）
 │   │   └── benchmark.rs        # benchmark 加载与校验（重复键、结构）
 │   ├── signal.rs               # Signal：pred 加载、结构校验、剥离 ret、按日索引
 │   ├── order.rs                # Order、Decision、TradeRecord
@@ -97,8 +98,10 @@ rust-bt/
     ├── acceptance/             # 合成用例精确验收（手算对拍）
     │   ├── mod.rs
     │   └── cases/              # 每用例一个文件：limit、paused、factor、delist、min_cost、lot、cash、两阶段核减、期初建仓、deal_price 列无效
+    ├── acceptance_wap.rs       # WAP 时段价合成验收（方向价、方向量、缺失行、策略可见价）
     ├── data/synthetic/         # 合成 CSV（3~5 只股票、约 10 个交易日）
-    └── smoke_tmp_data.rs       # tmp_data 端到端冒烟（数据缺失时自动跳过）
+    ├── smoke_tmp_data.rs       # tmp_data 端到端冒烟（数据缺失时自动跳过）
+    └── smoke_wap_data.rs       # tmp_data/wap.parquet 时段价冒烟
 ```
 
 ---
@@ -113,7 +116,9 @@ pub type DayIdx = u32;
 /// 股票 int 编码：SH600000 -> 600000（见规范"代码规范"）
 pub type Code = u32;
 
-pub enum DealPrice { Open, Close, Vwap }        // TryFrom<&str>，非法值 Err
+pub enum DealPrice { Open, Close, Vwap, Wap { kind: WapKind, window: u8 } } // TryFrom<&str>；Wap = vwapN/twapN（N=1..=11）
+pub enum WapKind { Vwap, Twap }
+impl WapKind { pub fn parse(s: &str) -> Result<Self>; pub fn as_str(&self) -> &'static str; }
 pub enum ExcessMethod { Arithmetic, Geometric } // TryFrom<&str>，非法值 Err
 pub enum BenchmarkName { Hs300, Zz500, Cyb, Zz800, Zz1000, Zz2000, Sci, Kci, Cyi }
 impl BenchmarkName {
@@ -148,10 +153,11 @@ pub struct StockBarStore {
     day_offsets: Vec<(u32, u32)>,        // 每个交易日 (start_row, len)，O(1) 取当日切片
 }
 
-pub struct BTData { /* stock_bar: StockBarStore, benchmark: DataFrame, calendar: TradingCalendar */ }
+pub struct BTData { /* stock_bar: Option<StockBarStore>, wap: Option<WapStore>, benchmark: Option<DataFrame>, calendar: TradingCalendar */ }
 impl BTData {
     pub fn new() -> Self;
     pub fn load_stock_bar(self, path: &str) -> Result<Self>;   // 结构校验（见规范校验表）；CSV/parquet 按扩展名识别
+    pub fn load_wap(self, path: &str, window: u8) -> Result<Self>; // vwapN/twapN 时段数据；parquet 按列投影只读 6 列
     pub fn load_benchmark(self, path: &str) -> Result<Self>;
     pub fn build(self) -> Result<Self>;                        // 统一校验 + 构建交易日历 + 日索引
 }
@@ -268,8 +274,9 @@ pub struct StockTradable {
     pub suspended: bool,     // paused = 1 或 close 缺失
     pub limit_buy: bool,
     pub limit_sell: bool,
-    pub volume_cap: f64,     // volume × volume_threshold；threshold = None 时 f64::INFINITY
-    pub deal_price: f64,     // T_exec 日 deal_price 列（委托定价与金额换算）
+    pub volume_cap: f64,     // 买入侧成交量上限：volume × volume_threshold（wap 模式 = buy_volume × threshold）；threshold = None 时 f64::INFINITY
+    pub sell_volume_cap: f64, // 卖出侧成交量上限（普通模式与 volume_cap 同值）
+    pub deal_price: f64,     // T_exec 日策略可见价：普通模式 = deal_price 列；wap 模式 = pre_close
     pub is_st: bool,        // 规范 forbid_st 参数所需；ST 状态盘前公开、非价格信息，不属前视
 }
 pub struct TradableInfo { /* 当日 SoA + Code -> 行索引 */ }
@@ -319,6 +326,7 @@ impl Exchange {
                fixed_slippage: f64, min_slippage_ratio: f64,
                volume_threshold: Option<f64>, limit_threshold: Option<f64>) -> Result<Self>;
     /// 单订单撮合：可交易性 -> 裁剪 -> 滑点 -> 资金反解 -> 整手 -> 费用 -> 回填 -> account.on_deal
+    /// wap 模式：撮合基价与量上限按方向取 wap_N_*_buy / _sell 与 buy_volume / sell_volume
     pub fn deal_order(&self, order: &mut Order, account: &mut Account, day: DayIdx);
 }
 ```
@@ -420,7 +428,7 @@ Report 另提供全部绘图序列的只读访问器（`dates` / `metrics` / `cu
 
 ```rust
 pub struct BtParams {
-    pub stock_bar: String, pub benchmark: String,       // 行情/基准 CSV 路径（每次 run 重新加载）
+    pub stock_bar: String, pub benchmark: String, pub wap: Option<String>, // wap 时段数据路径：deal_price = vwapN/twapN 时必填
     pub start_date: String, pub end_date: String,
     pub initial_cash: f64,
     pub strategy: StrategySpec,                          // TopkDropout{..} 参数化或 Custom(Box<dyn Strategy>)
@@ -461,6 +469,7 @@ pub fn signal_from_pairs(days: BTreeMap<NaiveDate, Vec<(String, f64)>>) -> Resul
 | D11 | 错误分层：内部 `thiserror` 类型化 `BtError`，公开 API 返回 `anyhow::Result` | 与规范示例签名（`anyhow::Result`）一致；内部保留错误分类（数据校验/日历/非法参数/撮合）便于测试断言与调用方 downcast |
 | D12 | 进度条与耗时：`with_progress` 开关（默认关闭）+ indicatif 渲染 stderr；耗时记 `BTResult.elapsed`，进度条结束行显示 | 库默认零终端输出（测试、无终端、输出重定向环境干净）；总日数在区间对齐后即知，进度与 ETA 确定；禁用时 `Option<ProgressBar>` 为 None、`Instant` 计时开销可忽略，不触碰主循环热路径（每交易日一次 `inc`，重绘由 indicatif 节流） |
 | D13 | 双层公开 API：高层便捷层 `api::run`（类型化 `BtParams` -> `BtOutput`）与组件 Facade 并存；CLI 经 `BtConfig::to_params` 复用高层层 | 嵌入方一次调用完成装配+回测+报告，参数用枚举（`DealPrice`/`BenchmarkName`/`ExcessMethod`）编译期杜绝拼写错误（YAML 层只能加载期校验）；信号支持内存构造（`SignalDay::from_pairs`，校验口径同 `load_signal`）；两层共用同一撮合与估值路径（集成测试对拍逐日账户与逐笔成交完全相等），CLI/示例/嵌入不再各维护一份装配逻辑。数据复用（参数扫描免重载行情）留待组件层后续演进（如 `Arc<StockBarStore>`） |
+| D14 | WAP 时段价方向化：`deal_price = vwapN/twapN` 时，策略可见价取 `pre_close`（决策时点合法已知），撮合基价与量上限按方向取 wap 数据的 `_buy`/`_sell` 列；装配期校验 wap 时段与 deal_price 一致 | 支持日内固定窗口 VWAP/TWAP 回测，同时守住信息边界：策略不提前看到 wap 价格，交易所按方向真实价格与容量成交；方向量上限防止用全日容量高估单边成交 |
 
 ---
 
@@ -504,8 +513,8 @@ pub enum BtError {
 对应规范"测试与验收"三层：
 
 1. **单元测试**（模块内 `#[cfg(test)]`）：`rules.rs` 纯函数全覆盖——limit 判定（含 5%/10%/20% 板幅与容差比例）、滑点两 regime、min_cost 反解两 regime 与边界、整手（100 股 / SH688 / SH689 / 卖出零股）；`position.rs` 的 factor 调整（当日新买入不调整、停牌恢复补调、epsilon 比较）；`types.rs` 编解码往返。
-2. **合成用例精确验收**（`tests/acceptance/` + `tests/data/synthetic/`）：3~5 只股票、约 10 个交易日、价格取整数/有限小数的手算用例，覆盖规范清单（涨跌停拦截、停牌、除权、退市估值沿用、min_cost 触发、整手不足一手、资金反解、两阶段核减、期初建仓（空仓首日买入 top_n）、deal_price 列无效（缺失/NaN/≤0）不可交易--后两项为规范单测清单中的引擎级行为，以合成用例覆盖）。断言逐笔成交明细与逐日 account/value/cash **完全相等**，外加不变量（持仓 ≤ top_n、卖出截断、T+1、进度条开关不改变 daily/trades 输出）。每个用例同时附带手算预期值文件，作为正确性基准。
-3. **端到端冒烟**（`tests/smoke_tmp_data.rs`）：检测 `tmp_data/` 存在才运行（否则跳过），全区间跑通无 panic，校验三个输出文件的列名与日期格式；**不做数值对拍**（tmp_data 仅格式参考）。
+2. **合成用例精确验收**（`tests/acceptance/` + `tests/acceptance_wap.rs` + `tests/data/synthetic/`）：3~5 只股票、约 10 个交易日、价格取整数/有限小数的手算用例，覆盖规范清单（涨跌停拦截、停牌、除权、退市估值沿用、min_cost 触发、整手不足一手、资金反解、两阶段核减、期初建仓（空仓首日买入 top_n）、deal_price 列无效（缺失/NaN/≤0）不可交易、**wap 模式方向价/方向量/缺失行/策略可见价**）。断言逐笔成交明细与逐日 account/value/cash **完全相等**，外加不变量（持仓 ≤ top_n、卖出截断、T+1、进度条开关不改变 daily/trades 输出）。每个用例同时附带手算预期值文件，作为正确性基准。
+3. **端到端冒烟**（`tests/smoke_tmp_data.rs` + `tests/smoke_wap_data.rs`）：检测 `tmp_data/` 存在才运行（否则跳过），全区间跑通无 panic，校验输出文件的列名与日期格式；**不做数值对拍**（tmp_data 仅格式参考）。
 
 ---
 

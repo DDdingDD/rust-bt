@@ -66,8 +66,29 @@ impl BtConfig {
                 self.strategy.top_n
             ));
         }
-        DealPrice::parse(&self.exchange.deal_price)
+        let deal_price = DealPrice::parse(&self.exchange.deal_price)
             .map_err(|e| anyhow!("exchange.deal_price 非法: {e}"))?;
+        // deal_price 为 vwapN/twapN 时必须提供 wap 数据路径；反之提供了 wap 路径
+        // 而 deal_price 未用时段价（多为拼写失误）也报错，防止静默忽略
+        let wap_path = self.data.wap.as_deref().is_some_and(|s| !s.is_empty());
+        match deal_price {
+            DealPrice::Wap { .. } => {
+                if !wap_path {
+                    return Err(anyhow!(
+                        "exchange.deal_price = {} 需要 data.wap（wap 时段数据路径）",
+                        self.exchange.deal_price
+                    ));
+                }
+            }
+            _ => {
+                if wap_path {
+                    return Err(anyhow!(
+                        "data.wap 已提供但 exchange.deal_price = {} 未使用 vwapN/twapN（时段价）",
+                        self.exchange.deal_price
+                    ));
+                }
+            }
+        }
         if BenchmarkName::from_name(&self.report.benchmark).is_none() {
             return Err(anyhow!(
                 "report.benchmark 未知基准名称: {}（不在映射表）",
@@ -115,6 +136,7 @@ impl BtConfig {
         Ok(BtParams {
             stock_bar: self.stock_bar().to_owned(),
             benchmark: self.benchmark_data().to_owned(),
+            wap: self.data.wap.clone(),
             start_date: self.start_date().to_owned(),
             end_date: self.end_date().to_owned(),
             initial_cash: self.account.initial_cash,
@@ -155,7 +177,8 @@ impl Default for BtConfig {
     }
 }
 
-/// 行情数据文件路径（全部必填）。
+/// 行情数据文件路径（stock_bar 与 benchmark 必填；wap 在 deal_price 为
+/// vwapN/twapN 时必填，见 `ExchangeConfig::deal_price`）。
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
 pub struct DataConfig {
@@ -163,6 +186,8 @@ pub struct DataConfig {
     pub stock_bar: Option<String>,
     /// 基准收益 CSV（benchmark.csv）。
     pub benchmark: Option<String>,
+    /// wap 时段数据（wap.csv / wap.parquet，deal_price 为 vwapN/twapN 时必填）。
+    pub wap: Option<String>,
 }
 
 /// 回测区间：闭开区间 [start_date, end_date)，自动按交易日历对齐（全部必填）。
@@ -221,7 +246,8 @@ impl Default for StrategyConfig {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct ExchangeConfig {
-    /// 成交价：open / close / vwap。
+    /// 成交价：open / close / vwap / vwapN / twapN（N = 1..=11 时段价，需 data.wap；
+    /// 时段表见 doc/specification.md "数据文件格式--wap 数据"）。
     pub deal_price: String,
     /// 买入费率（万 1.5）。
     pub open_cost: f64,
@@ -363,6 +389,7 @@ signal: "s.csv"
 data:
   stock_bar: "b.csv"
   benchmark: "m.csv"
+  wap: "w.parquet"
 period:
   start_date: "2026-01-01"
   end_date: "2026-03-01"
@@ -374,7 +401,7 @@ strategy:
   only_tradable: true
   forbid_st: true
 exchange:
-  deal_price: "vwap"
+  deal_price: "vwap11"
   open_cost: 0.0002
   volume_threshold: null
   limit_threshold: null
@@ -392,7 +419,8 @@ progress: false
         assert_eq!(cfg.strategy.drop_n, 5);
         assert!(cfg.strategy.only_tradable);
         assert!(cfg.strategy.forbid_st);
-        assert_eq!(cfg.exchange.deal_price, "vwap");
+        assert_eq!(cfg.exchange.deal_price, "vwap11");
+        assert_eq!(cfg.data.wap.as_deref(), Some("w.parquet"));
         assert_eq!(cfg.exchange.open_cost, 0.0002);
         // null 显式表示不限制；未写的字段仍取默认
         assert_eq!(cfg.exchange.volume_threshold, None);
@@ -445,5 +473,28 @@ progress: false
         let yaml = format!("{MINIMAL_YAML}exchange:\n  deal_price: \"avg\"\n");
         let err = parse(&yaml).unwrap_err().to_string();
         assert!(err.contains("deal_price"), "报错应含字段名: {err}");
+    }
+
+    #[test]
+    fn wap_deal_price_requires_wap_path() {
+        // vwapN / twapN 需要 data.wap
+        let yaml = format!("{MINIMAL_YAML}exchange:\n  deal_price: \"vwap11\"\n");
+        let err = parse(&yaml).unwrap_err().to_string();
+        assert!(err.contains("data.wap"), "vwap11 缺 wap 路径应报错: {err}");
+
+        let yaml = format!("{MINIMAL_YAML}exchange:\n  deal_price: \"twap3\"\n");
+        let err = parse(&yaml).unwrap_err().to_string();
+        assert!(err.contains("data.wap"), "twap3 缺 wap 路径应报错: {err}");
+    }
+
+    #[test]
+    fn wap_path_only_with_wap_deal_price() {
+        // data.wap 提供但 deal_price 未用时段价（多为拼写失误）也报错
+        let yaml = MINIMAL_YAML.replace(
+            "  benchmark: \"tmp_data/benchmark.csv\"",
+            "  benchmark: \"tmp_data/benchmark.csv\"\n  wap: \"w.parquet\"",
+        );
+        let err = parse(&yaml).unwrap_err().to_string();
+        assert!(err.contains("data.wap"), "wap 提供但 deal_price 非时段价应报错: {err}");
     }
 }

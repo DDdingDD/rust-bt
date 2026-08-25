@@ -8,12 +8,49 @@ pub type DayIdx = u32;
 /// 股票 int 编码：SH600000 -> 600000（规范"代码规范"）。
 pub type Code = u32;
 
+/// wap 时段价格类型（`deal_price = vwapN / twapN` 的种类，规范"Exchange 参数配置--deal_price"）。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum WapKind {
+    /// 时段成交量加权均价（`wap_N_*_vwap*` 列）
+    Vwap,
+    /// 时段时间加权均价（`wap_N_*_twap*` 列）
+    Twap,
+}
+
+impl WapKind {
+    pub fn parse(s: &str) -> Result<Self> {
+        match s {
+            "vwap" => Ok(Self::Vwap),
+            "twap" => Ok(Self::Twap),
+            other => Err(BtError::InvalidParam(format!(
+                "wap 价格类型仅支持 vwap/twap，收到: {other}"
+            ))),
+        }
+    }
+
+    /// 与 `parse` 互逆的规范名。
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Vwap => "vwap",
+            Self::Twap => "twap",
+        }
+    }
+}
+
+/// wap 时段编号范围：wap_1 ..= wap_11（规范"数据文件格式--wap 数据"时段表）。
+pub const WAP_WINDOW_MAX: u8 = 11;
+
 /// 成交价格列选择（规范"Exchange 参数配置--deal_price"）。
+///
+/// `Wap` 变体为时段成交价（`vwapN` / `twapN`，N = 1..=11）：价格与成交量取自 wap 数据
+/// （`wap_N_*_buy` / `wap_N_*_sell` 方向列），策略委托定价只可见 `pre_close`。
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum DealPrice {
     Open,
     Close,
     Vwap,
+    /// 时段 VWAP/TWAP：`kind` 选价格族，`window` 为时段号 1..=11。
+    Wap { kind: WapKind, window: u8 },
 }
 
 impl DealPrice {
@@ -23,18 +60,48 @@ impl DealPrice {
             "open" => Ok(Self::Open),
             "close" => Ok(Self::Close),
             "vwap" => Ok(Self::Vwap),
-            other => Err(BtError::InvalidParam(format!(
-                "deal_price 仅支持 open/close/vwap，收到: {other}"
-            ))),
+            other => {
+                for (prefix, kind) in [("vwap", WapKind::Vwap), ("twap", WapKind::Twap)] {
+                    if let Some(num) = other.strip_prefix(prefix) {
+                        // 时段号须为无前导零的十进制（1..=11），与 Display 输出互逆
+                        return match num.parse::<u8>() {
+                            Ok(w) if !num.starts_with('0')
+                                && (1..=WAP_WINDOW_MAX).contains(&w) =>
+                            {
+                                Ok(Self::Wap { kind, window: w })
+                            }
+                            _ => Err(BtError::InvalidParam(format!(
+                                "deal_price 时段号须在 1..={WAP_WINDOW_MAX}（无前导零），收到: {other}"
+                            ))),
+                        };
+                    }
+                }
+                Err(BtError::InvalidParam(format!(
+                    "deal_price 仅支持 open/close/vwap/vwapN/twapN（N=1..={WAP_WINDOW_MAX}），收到: {other}"
+                )))
+            }
         }
     }
 
-    /// 对应的 stock_bar 价格列名。
-    pub fn column(&self) -> &'static str {
+    /// 与 `parse` 互逆的规范名（配置回显 / 报错信息用，见 `Display`）。
+    /// wap 模式对应 wap 数据方向列而非 stock_bar 单列，`column()` 返回 `None`。
+    pub fn column(&self) -> Option<&'static str> {
         match self {
-            Self::Open => "open",
-            Self::Close => "close",
-            Self::Vwap => "vwap",
+            Self::Open => Some("open"),
+            Self::Close => Some("close"),
+            Self::Vwap => Some("vwap"),
+            Self::Wap { .. } => None,
+        }
+    }
+}
+
+impl std::fmt::Display for DealPrice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Open => write!(f, "open"),
+            Self::Close => write!(f, "close"),
+            Self::Vwap => write!(f, "vwap"),
+            Self::Wap { kind, window } => write!(f, "{}{}", kind.as_str(), window),
         }
     }
 }
@@ -190,13 +257,17 @@ pub fn is_star_market(code: Code) -> bool {
 pub struct StockTradable {
     /// 停牌：paused = 1 或 close 缺失
     pub suspended: bool,
-    /// 涨停不可买入（按 deal_price 列对 pre_close 判定）
+    /// 涨停不可买入（按撮合买侧基价对 pre_close 判定）
     pub limit_buy: bool,
-    /// 跌停不可卖出
+    /// 跌停不可卖出（按撮合卖侧基价对 pre_close 判定）
     pub limit_sell: bool,
-    /// 当日成交量上限：volume × volume_threshold；threshold = None 时 +∞；无量 / 缺失为 0
+    /// 当日买入侧成交量上限：volume × volume_threshold（wap 模式 = buy_volume × threshold）；
+    /// threshold = None 时 +∞；无量 / 缺失为 0
     pub volume_cap: f64,
-    /// T_exec 日 deal_price 列价格（委托定价与金额换算）；无效时为 NaN
+    /// 当日卖出侧成交量上限（普通模式与 `volume_cap` 同值；wap 模式 = sell_volume × threshold）
+    pub sell_volume_cap: f64,
+    /// 委托定价与金额换算用价格：普通模式 = T_exec 日 deal_price 列；wap 模式 = pre_close
+    /// （决策时点合法已知，避免未来函数）；无效时为 NaN
     pub deal_price: f64,
     /// 是否 ST（盘前公开信息，供 forbid_st 使用）
     pub is_st: bool,
@@ -216,7 +287,7 @@ impl StockTradable {
     pub fn sellable(&self) -> bool {
         !self.suspended
             && !self.limit_sell
-            && self.volume_cap > 0.0
+            && self.sell_volume_cap > 0.0
             && self.deal_price.is_finite()
             && self.deal_price > 0.0
     }
@@ -233,6 +304,7 @@ pub struct TradableInfo<'a> {
     pub(crate) limit_buy: &'a [bool],
     pub(crate) limit_sell: &'a [bool],
     pub(crate) volume_cap: &'a [f64],
+    pub(crate) sell_volume_cap: &'a [f64],
     pub(crate) deal_price: &'a [f64],
     pub(crate) is_st: &'a [bool],
 }
@@ -246,6 +318,7 @@ impl<'a> TradableInfo<'a> {
             limit_buy: self.limit_buy[i],
             limit_sell: self.limit_sell[i],
             volume_cap: self.volume_cap[i],
+            sell_volume_cap: self.sell_volume_cap[i],
             deal_price: self.deal_price[i],
             is_st: self.is_st[i],
         })
@@ -301,5 +374,40 @@ mod tests {
         assert!(ExcessMethod::parse("geo").is_err());
         assert_eq!(BenchmarkName::from_name("zz1000").unwrap().instrument(), "SH000852");
         assert!(BenchmarkName::from_name("CSI000400").is_none());
+    }
+
+    #[test]
+    fn deal_price_wap_parse() {
+        use WapKind::*;
+        assert_eq!(
+            DealPrice::parse("vwap11").unwrap(),
+            DealPrice::Wap { kind: Vwap, window: 11 }
+        );
+        assert_eq!(
+            DealPrice::parse("twap1").unwrap(),
+            DealPrice::Wap { kind: Twap, window: 1 }
+        );
+        assert_eq!(
+            DealPrice::parse("vwap5").unwrap(),
+            DealPrice::Wap { kind: Vwap, window: 5 }
+        );
+        // 边界时段号合法
+        assert_eq!(DealPrice::parse("twap11").unwrap().to_string(), "twap11");
+        assert_eq!(DealPrice::parse("vwap1").unwrap().to_string(), "vwap1");
+        // 非法：越界 / 裸 twap / 下划线 / 拼写 / 前导零
+        for bad in [
+            "vwap0", "vwap12", "twap99", "twap", "vwap_11", "wap11", "vwap11x", "VWAP11",
+            "vwap01", "twap007",
+        ] {
+            assert!(DealPrice::parse(bad).is_err(), "应拒绝: {bad}");
+        }
+        // column：仅基础模式有 stock_bar 列
+        assert_eq!(DealPrice::parse("open").unwrap().column(), Some("open"));
+        assert_eq!(DealPrice::parse("vwap").unwrap().column(), Some("vwap"));
+        assert_eq!(DealPrice::parse("twap11").unwrap().column(), None);
+        // Display 与 parse 互逆
+        for s in ["open", "close", "vwap", "vwap3", "twap11"] {
+            assert_eq!(DealPrice::parse(s).unwrap().to_string(), s);
+        }
     }
 }

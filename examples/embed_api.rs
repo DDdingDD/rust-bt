@@ -83,6 +83,7 @@ fn main() -> anyhow::Result<()> {
     let params = BtParams {
         stock_bar: "tmp_data/stock_bar.csv".into(),
         benchmark: "tmp_data/benchmark.csv".into(),
+        wap: None, // wap 时段数据：仅当 deal_price = vwapN/twapN 时提供
         start_date: "2026-01-01".into(),
         end_date: "2026-06-01".into(),
         initial_cash: 10_000_000.0,

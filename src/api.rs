@@ -34,6 +34,9 @@ pub struct BtParams {
     pub stock_bar: String,
     /// 基准收益 CSV 路径（benchmark.csv，报告必需）。
     pub benchmark: String,
+    /// wap 时段数据路径（CSV 或 parquet，按扩展名识别）；`deal_price` 为
+    /// vwapN/twapN 时必填，时段号按 deal_price 推导。
+    pub wap: Option<String>,
     /// 回测区间（闭开区间 [start, end)，按交易日历自动对齐）。
     pub start_date: String,
     pub end_date: String,
@@ -218,8 +221,8 @@ pub fn run(params: BtParams, signal: &Signal) -> Result<BtOutput> {
         ),
         StrategySpec::Custom(s) => s,
     };
-    let exchange = Exchange::new(
-        params.exchange.deal_price.column(),
+    let exchange = Exchange::with_deal_price(
+        params.exchange.deal_price,
         params.exchange.open_cost,
         params.exchange.close_cost,
         params.exchange.min_cost,
@@ -229,13 +232,32 @@ pub fn run(params: BtParams, signal: &Signal) -> Result<BtOutput> {
         params.exchange.limit_threshold,
     )?;
 
-    // 3. 加载数据 -> 运行 -> 报告
-    let data = BTData::new()
-        .load_stock_bar(&params.stock_bar)?
-        .load_benchmark(&params.benchmark)?
-        .build()?;
+    // 3. wap 路径与 deal_price 匹配校验（先于数据加载 fail fast）
+    let wap_window = match params.exchange.deal_price {
+        DealPrice::Wap { window, .. } => Some(window),
+        _ => None,
+    };
+    if wap_window.is_some() && params.wap.is_none() {
+        return Err(BtError::InvalidParam(format!(
+            "deal_price={} 需要 wap 时段数据，请设置 BtParams.wap",
+            params.exchange.deal_price
+        )));
+    }
+    if params.wap.is_some() && wap_window.is_none() {
+        log::warn!(
+            "BtParams.wap 已提供但 deal_price={} 未使用 vwapN/twapN，忽略",
+            params.exchange.deal_price
+        );
+    }
+
+    // 4. 加载数据 -> 运行 -> 报告
+    let mut data = BTData::new().load_stock_bar(&params.stock_bar)?;
+    if let (Some(path), Some(window)) = (&params.wap, wap_window) {
+        data = data.load_wap(path, window)?;
+    }
+    let data = data.load_benchmark(&params.benchmark)?.build()?;
     let account = Account::new(params.initial_cash);
-    let mut backtest = Backtest::new(data, account, exchange, strategy).with_progress(params.progress);
+    let mut backtest = Backtest::new(data, account, exchange, strategy)?.with_progress(params.progress);
     let result = backtest.run(signal, &params.start_date, &params.end_date)?;
     let report = result.gen_report(
         params.benchmark_name.as_str(),
@@ -270,6 +292,7 @@ mod tests {
         BtParams {
             stock_bar: "x.csv".into(),
             benchmark: "b.csv".into(),
+            wap: None,
             start_date: "2026-01-01".into(),
             end_date: "2026-06-01".into(),
             initial_cash: 1_000_000.0,

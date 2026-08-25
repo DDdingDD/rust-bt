@@ -129,7 +129,7 @@ fn run_twice_rejected() {
         .unwrap();
     let exchange = Exchange::new("open", 0.0, 0.0, 0.0, 0.0, 0.0, None, Some(0.0985)).unwrap();
     let strategy: Box<dyn Strategy> = Box::new(TopkDropoutStrategy::new(2, 1));
-    let mut bt = Backtest::new(data, Account::new(100_000.0), exchange, strategy);
+    let mut bt = Backtest::new(data, Account::new(100_000.0), exchange, strategy).unwrap();
 
     bt.run(&signal, "2026-01-05", "2026-01-08").unwrap();
     match bt.run(&signal, "2026-01-05", "2026-01-08") {

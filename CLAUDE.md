@@ -16,12 +16,13 @@ cargo test --lib                                    # 单元测试（rules/types
 cargo test --test acceptance_basic                  # 跑单个验收测试文件
 cargo test --test '*'                               # 全部合成验收用例（手算对拍）
 cargo test --release --test smoke_tmp_data          # tmp_data 冒烟（加载 937MB CSV，debug 下约 60s，务必用 release）
+cargo test --release --test smoke_wap_data          # tmp_data/wap.parquet 时段价冒烟（约 2.7GB，务必用 release）
 cargo test                                          # 全量（含 debug 冒烟，慢）
 ```
 
 ## 架构要点（跨文件才能看清的部分）
 
-**权威设计在文档里**：`doc/architecture.md` §4 定义了全部核心类型签名，§5 记录了 13 条关键决策（D1-D13）及其理由。改动撮合、复权、信息边界相关代码前必读。
+**权威设计在文档里**：`doc/architecture.md` §4 定义了全部核心类型签名，§5 记录了 14 条关键决策（D1-D14）及其理由。改动撮合、复权、信息边界、WAP 时段价相关代码前必读。
 
 **双层公开 API（决策 D13）**：嵌入外部 Rust 代码用 `api::run`（`BtParams` 类型化参数 -> `BtOutput` 内存结果，可选 `export_all` 导出）；CLI 与示例共用该路径（`BtConfig::to_params`），勿再手写装配。组件 Facade（`BTData`/`Account`/`Exchange`/`Backtest`）供细粒度编排，两层必须共用同一撮合与估值路径（`tests/embedding_api.rs` 对拍守护）。
 
@@ -38,6 +39,8 @@ cargo test                                          # 全量（含 debug 冒烟�
 **费用口径**：费用直接扣现金、不摊入 `cost_price`；不含成本口径由 `V + 累计费用` 在 Report 层派生（近似，决策 D5）。现金允许为负（卖出费用超成交金额）。
 
 **首日口径**：`r_0 = 0`，首日盈亏只进 `account` 列、不进收益率/净值序列；turnover/cost 分母为前一交易日总资产，首个交易日用期初资金。
+
+**WAP 时段价（决策 D14）**：`deal_price` 支持 `vwapN`/`twapN`（N=1..=11，11 个固定日内窗口的时段表见规范"数据文件格式--wap 数据"），需经 `BTData::load_wap` / `BtParams.wap` / YAML `data.wap` 提供对应窗口的 wap 数据。策略可见价仍为 `pre_close`（防前视），撮合时交易所按方向取 `_buy`/`_sell` 列作为成交价，量上限按方向 `buy_volume`/`sell_volume` 计算；`limit_buy`/`limit_sell` 同样按方向 wap 价对 `pre_close` 预计算。
 
 ## 测试约定
 

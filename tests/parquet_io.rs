@@ -69,6 +69,7 @@ fn api_params(dir: &TempDir, stock_bar: &str, benchmark: &str) -> BtParams {
     BtParams {
         stock_bar: dir.path().join(stock_bar).to_str().unwrap().into(),
         benchmark: dir.path().join(benchmark).to_str().unwrap().into(),
+        wap: None,
         start_date: "2026-01-05".into(),
         end_date: "2026-01-10".into(),
         initial_cash: 100_000.0,

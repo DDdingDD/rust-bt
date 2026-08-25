@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 
 use chrono::NaiveDate;
 use common::*;
-use rust_bt::{api, BtParams, DealPrice, ExportNames, ExchangeParams, StrategySpec, TopkDropoutStrategy};
+use rust_bt::{api, BtParams, DealPrice, ExportNames, ExchangeParams, StrategySpec, TopkDropoutStrategy, WapKind};
 use tempfile::TempDir;
 
 const D: [&str; 5] = [
@@ -59,6 +59,7 @@ fn api_params(dir: &TempDir, strategy: StrategySpec) -> BtParams {
     BtParams {
         stock_bar: dir.path().join("stock_bar.csv").to_str().unwrap().into(),
         benchmark: dir.path().join("benchmark.csv").to_str().unwrap().into(),
+        wap: None,
         start_date: "2026-01-05".into(),
         end_date: "2026-01-10".into(),
         initial_cash: 100_000.0,
@@ -177,6 +178,37 @@ fn export_all_writes_four_artifacts() {
             .unwrap_or_else(|e| panic!("{name} 应存在: {e}"));
         assert!(meta.len() > 0, "{name} 不应为空文件");
     }
+}
+
+#[test]
+fn wap_run_matches_component_layer() {
+    // 与 in_memory_signal_run_matches_component_layer 同构，但 deal_price = vwap11
+    let (dir, mut params) = setup(true);
+    params.deal_price = "vwap11".into();
+
+    // wap 行：价格/量与 stock_bar 同构（方向价均 10，方向量均 1e6），
+    // 因此 vwap11 结果应与 open 完全一致
+    let mut wap_rows = Vec::new();
+    for d in D {
+        for inst in ["SH600001", "SH600002", "SZ000001"] {
+            wap_rows.push(WapRow::new(d, inst));
+        }
+    }
+    write_wap(dir.path(), 11, &wap_rows);
+
+    let expected = run_bt(&dir,
+        &params);
+
+    let mut api_p = api_params(&dir, StrategySpec::topk_dropout(2, 1));
+    api_p.wap = Some(dir.path().join("wap.csv").to_str().unwrap().into());
+    api_p.exchange.deal_price = DealPrice::Wap {
+        kind: WapKind::Vwap,
+        window: 11,
+    };
+    let output = api::run(api_p, &in_memory_signal()).unwrap();
+
+    assert_daily_same(&output.result, &expected);
+    assert_trades_same(&output.result, &expected);
 }
 
 #[test]

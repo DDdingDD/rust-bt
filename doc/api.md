@@ -54,6 +54,7 @@ fn main() -> anyhow::Result<()> {
     let params = BtParams {
         stock_bar: "tmp_data/stock_bar.csv".into(),   // 股票日行情（交易日历来源；CSV 或 parquet）
         benchmark: "tmp_data/benchmark.csv".into(),   // 基准收益（报告必需；CSV 或 parquet）
+        wap: None,                                    // wap 时段数据：deal_price = vwapN/twapN 时必填
         start_date: "2026-01-01".into(),              // 区间 [start, end)，按交易日历自动对齐
         end_date: "2026-06-01".into(),
         initial_cash: 10_000_000.0,                   // 期初资金
@@ -108,6 +109,7 @@ fn main() -> anyhow::Result<()> {
 | --- | --- | --- |
 | `stock_bar` | `String` | 股票日行情路径（CSV 或 parquet，按扩展名识别）；交易日历由其中全部 `datetime` 去重排序构成 |
 | `benchmark` | `String` | 基准收益路径（CSV 或 parquet，同上）；一个文件可含多个指数，报告按 `benchmark_name` 选定 |
+| `wap` | `Option<String>` | wap 时段数据路径（CSV 或 parquet）；`exchange.deal_price` 为 `vwapN`/`twapN`（N=1..=11，时段表见规范"数据文件格式--wap 数据"）时必填 |
 | `start_date` / `end_date` | `String` | `YYYY-MM-DD`；闭开区间 `[start, end)`，按交易日历自动对齐 |
 | `initial_cash` | `f64` | 期初资金，须为正的有限值 |
 | `strategy` | `StrategySpec` | 见 §4.3 与 §8 |
@@ -123,7 +125,7 @@ fn main() -> anyhow::Result<()> {
 
 | 字段 | 类型 | 默认值 | 说明 |
 | --- | --- | --- | --- |
-| `deal_price` | `DealPrice` | `Open` | 成交价列：`Open` / `Close` / `Vwap` |
+| `deal_price` | `DealPrice` | `Open` | 成交价列：`Open` / `Close` / `Vwap` / `Wap { kind: Vwap/Twap, window: 1..=11 }`（时段表见规范"数据文件格式--wap 数据"） |
 | `open_cost` | `f64` | `0.00015` | 买入费率（万 1.5） |
 | `close_cost` | `f64` | `0.00065` | 卖出费率（佣金 + 印花税，万 6.5） |
 | `min_cost` | `f64` | `5.0` | 单笔最低费用（元） |
@@ -382,10 +384,11 @@ impl Strategy for Top1Rotation {
 ```rust
 StockTradable {
     suspended: bool,   // 停牌（paused=1 或 close 缺失）
-    limit_buy: bool,   // 涨停不可买（按 deal_price 列对 pre_close 判定）
+    limit_buy: bool,   // 涨停不可买（按 deal_price 列对 pre_close 判定；wap 模式按方向 wap 价判定）
     limit_sell: bool,  // 跌停不可卖
-    volume_cap: f64,   // 当日可成交上限（volume × threshold；无量为 0）
-    deal_price: f64,   // 当日成交价列（无效为 NaN）
+    volume_cap: f64,   // 买入侧当日可成交上限（volume × threshold；wap 模式 = buy_volume × threshold；无量为 0）
+    sell_volume_cap: f64, // 卖出侧当日可成交上限（普通模式与 volume_cap 同值；wap 模式 = sell_volume × threshold）
+    deal_price: f64,   // 当日策略可见价：普通模式 = deal_price 列；wap 模式 = pre_close（无效为 NaN）
     is_st: bool,       // ST 标记（盘前公开信息）
 }
 // 快捷判定：t.buyable() / t.sellable()

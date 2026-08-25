@@ -3,10 +3,12 @@
 pub mod benchmark;
 pub mod calendar;
 pub mod stock_bar;
+pub mod wap;
 
 pub use benchmark::BenchmarkStore;
 pub use calendar::TradingCalendar;
 pub use stock_bar::StockBarStore;
+pub use wap::WapStore;
 
 use std::path::Path;
 
@@ -33,6 +35,38 @@ pub(crate) fn read_dataframe(path: &Path) -> Result<DataFrame> {
             .with_has_header(true)
             .try_into_reader_with_file_path(Some(path.to_path_buf()))?
             .finish()?,
+    };
+    Ok(df)
+}
+
+/// 按扩展名读取 DataFrame 的指定列子集（列名缺失由调用方按必需列校验报错）。
+///
+/// parquet 走列投影（wap 数据 90 列 2.7GB，只读所需 8 列）；CSV 无投影则全读后
+/// select。`columns` 为空时等价于 [`read_dataframe`]。
+pub(crate) fn read_dataframe_columns(path: &Path, columns: &[String]) -> Result<DataFrame> {
+    if columns.is_empty() {
+        return read_dataframe(path);
+    }
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_ascii_lowercase())
+        .unwrap_or_default();
+    let df = match ext.as_str() {
+        "parquet" | "pq" => {
+            let file = std::fs::File::open(path)?;
+            ParquetReader::new(file)
+                .with_columns(Some(columns.to_vec()))
+                .finish()?
+        }
+        _ => {
+            let df = CsvReadOptions::default()
+                .with_has_header(true)
+                .try_into_reader_with_file_path(Some(path.to_path_buf()))?
+                .finish()?;
+            df.select(columns)
+                .map_err(|e| BtError::Validation(format!("列选择失败: {e}")))?
+        }
     };
     Ok(df)
 }
@@ -71,6 +105,8 @@ pub(crate) fn date_strings(df: &DataFrame, name: &str) -> Result<Vec<String>> {
 pub struct BTData {
     pub(crate) stock_bar: Option<StockBarStore>,
     pub(crate) benchmark: Option<BenchmarkStore>,
+    /// 时段 VWAP/TWAP 数据（`deal_price = vwapN / twapN` 时必需，装配期校验）
+    pub(crate) wap: Option<WapStore>,
 }
 
 impl BTData {
@@ -78,6 +114,7 @@ impl BTData {
         Self {
             stock_bar: None,
             benchmark: None,
+            wap: None,
         }
     }
 
@@ -90,6 +127,13 @@ impl BTData {
     /// 加载基准收益（一个文件可含多个指数，全部加载）。
     pub fn load_benchmark(mut self, path: &str) -> Result<Self> {
         self.benchmark = Some(BenchmarkStore::load(Path::new(path))?);
+        Ok(self)
+    }
+
+    /// 加载 wap 时段数据（CSV 或 parquet）。`window` 为时段号 1..=11，须与
+    /// `deal_price` 的时段一致（`Backtest::new` 装配期校验，不一致报错）。
+    pub fn load_wap(mut self, path: &str, window: u8) -> Result<Self> {
+        self.wap = Some(WapStore::load(Path::new(path), window)?);
         Ok(self)
     }
 

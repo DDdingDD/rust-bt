@@ -38,6 +38,7 @@ fn main() -> anyhow::Result<()> {
     // 5. 加载行情与基准数据
     let data = BTData::new()
         .load_stock_bar("stock_bar.csv")?
+        // .load_wap("wap.parquet", 11)? // 仅当 deal_price = "vwap11"/"twap11" 时加载
         .load_benchmark("benchmark.csv")?
         .build()?;
 
@@ -80,7 +81,7 @@ bt config.yml          # 或 cargo run --release --bin bt -- config.yml
 ```
 
 - 参数仅一个位置参数：配置文件路径；缺省打印用法并以退出码 2 退出。
-- 完整字段与默认值见仓库根目录 `config.example.yml`（带注释）。**必填**仅信号路径（`signal`）、行情数据路径（`data.stock_bar` / `data.benchmark`）与回测区间（`period.start_date` / `period.end_date`）；其余字段省略时取默认值（即上文示例代码中的取值：1000 万资金、top_n=drop_n=100、open 成交、万 1.5/万 6.5 费率等）。
+- 完整字段与默认值见仓库根目录 `config.example.yml`（带注释）。**必填**仅信号路径（`signal`）、行情数据路径（`data.stock_bar` / `data.benchmark`）与回测区间（`period.start_date` / `period.end_date`）；`data.wap` 在 `exchange.deal_price` 为 `vwapN` / `twapN`（N = 1..=11）时必填。其余字段省略时取默认值（即上文示例代码中的取值：1000 万资金、top_n=drop_n=100、open 成交、万 1.5/万 6.5 费率等）。
 - `exchange.volume_threshold` / `exchange.limit_threshold` 写 `null` 表示不限制。
 - 报错：必填字段缺失时报错并指明字段名；`strategy.name` 目前仅接受 `topk_dropout`，其他值报错。
 - 输出：`output.dir` 目录（默认 `output/`，自动创建）下生成 hist_position / trades / report_data / report_plot 四个产物，文件名可配置。
@@ -97,6 +98,7 @@ use rust_bt::{run, signal_from_pairs, BtParams, ExchangeParams, StrategySpec};
 let params = BtParams {
     stock_bar: "stock_bar.csv".into(),
     benchmark: "benchmark.csv".into(),
+    wap: None, // wap 时段数据：deal_price = vwapN/twapN 时必填，如 Some("wap.parquet".into())
     start_date: "2026-01-01".into(),
     end_date: "2026-06-01".into(),
     initial_cash: 10_000_000.0,
@@ -143,6 +145,7 @@ fn load_signal(path: &str) -> anyhow::Result<Signal>;
 impl BTData {
     fn new() -> Self;
     fn load_stock_bar(self, path: &str) -> anyhow::Result<Self>;
+    fn load_wap(self, path: &str, window: u8) -> anyhow::Result<Self>; // vwapN/twapN 时段数据（CSV/parquet）
     fn load_benchmark(self, path: &str) -> anyhow::Result<Self>;
     fn build(self) -> anyhow::Result<BTData>;
 }
@@ -280,10 +283,10 @@ gen_decision(signal, position, cash, tradable_info) -> Decision
 
 - T−1 日信号（`score`，已剥离 `ret`）；
 - 复权调整后的当前持仓与可用现金；
-- `tradable_info`：T_exec 日各股可交易性--`paused` / `limit_buy` / `limit_sell` / 当日成交量上限（`volume × volume_threshold`；`volume_threshold = None` 时为 ∞，不设限）；
-- T_exec 日 `deal_price` 列（用于委托定价与金额换算）。
+- `tradable_info`：T_exec 日各股可交易性--`paused` / `limit_buy` / `limit_sell` / 当日成交量上限（`volume × volume_threshold`；`volume_threshold = None` 时为 ∞，不设限；**wap 模式下买入/卖出分别取 `buy_volume` / `sell_volume` 计算方向量上限**）；
+- T_exec 日 `deal_price` 列（用于委托定价与金额换算；**wap 模式下策略可见价为 `pre_close`**，实际撮合由交易所按方向 wap 价格执行）。
 
-涨跌停基于当日 `deal_price` 对 `pre_close` 判定：`deal_price = "open"` 时开盘竞价结束即可得，属合法可见；`deal_price = "close" / "vwap"` 时判定价格与成交价在决策时点不可得，属于"以收盘价/全日均价成交"的**简化假设**（研究近似：信号仍为 T−1 日，不构成对盘后数据的策略性利用）。策略**不可见**当日行情的其他列，也不可见信号 `ret` 列。内置策略委托价格统一取当日 `deal_price`。
+涨跌停基于当日 `deal_price` 对 `pre_close` 判定：`deal_price = "open"` 时开盘竞价结束即可得，属合法可见；`deal_price = "close" / "vwap"` 时判定价格与成交价在决策时点不可得，属于"以收盘价/全日均价成交"的**简化假设**（研究近似：信号仍为 T−1 日，不构成对盘后数据的策略性利用）。**`deal_price = "vwapN" / "twapN"` 时，策略按 `pre_close` 定价与判断可交易性，真实成交由交易所取对应窗口的方向 wap 价格，避免策略提前看到 wap 价格。** 策略**不可见**当日行情的其他列，也不可见信号 `ret` 列。内置策略委托价格统一取当日 `deal_price`（wap 模式下为 `pre_close`）。
 
 同样属于简化假设：`tradable_info` 的当日成交量上限取自**全日**成交量，在 `deal_price = "open"` 时亦为盘后信息（开盘时不可得）。容量约束按全日量近似，与 `close` / `vwap` 成交价的前视一并接受，不视为前视偏差漏洞。
 
@@ -470,7 +473,10 @@ cost_price /= factor_ratio                  // 除权导致成本价降低
 
 ### deal_price —— 成交价格
 
-订单成交价取自行情的哪一列，当前支持 `"open"`、`"close"`、`"vwap"`（对应 `stock_bar.csv` 的 `vwap` 列）；传入不支持的值在 Exchange 构建时返回 `Err`。当日该列缺失 / NaN / ≤ 0（如无成交日 `vwap = money / volume` 无效）时该股不可交易，见"数据校验"。
+订单成交价取自行情的哪一列，当前支持 `"open"`、`"close"`、`"vwap"`（对应 `stock_bar.csv` 的 `vwap` 列）以及 `"vwapN"` / `"twapN"`（N = 1..=11，对应 wap 时段数据文件的方向列）。传入不支持的值在 Exchange 构建时返回 `Err`。
+
+- 普通模式（`open` / `close` / `vwap`）：当日该列缺失 / NaN / ≤ 0（如无成交日 `vwap = money / volume` 无效）时该股不可交易，见"数据校验"。
+- WAP 模式（`vwapN` / `twapN`）：需额外提供 wap 时段数据（`BTData::load_wap(path, N)` 或 YAML `data.wap` / API `BtParams.wap`）。买入成交取该窗口的 `wap_N_vwap_buy` / `wap_N_twap_buy`，卖出成交取 `wap_N_vwap_sell` / `wap_N_twap_sell`；**成交量限制比例分别按对应窗口的 `wap_N_buy_volume` / `wap_N_sell_volume` 计算**。wap 数据缺失的 (date, instrument) 组合视为不可交易；方向价 ≤ 0 / 缺失 / NaN 时该方向不可成交；方向量 ≤ 0 时该方向可成交量为 0。策略可见价仍取 `pre_close`（信息边界），委托价由策略按 `pre_close` 填写，交易所按方向 wap 价实际撮合。
 
 ### open_cost —— 买入费率
 
@@ -542,7 +548,7 @@ cost_price /= factor_ratio                  // 除权导致成本价降低
   limit_sell = change ≤ down_chg × (limit_threshold / 0.1)
   ```
   
-  其中 `change` 使用 `deal_price` 参数对应的价格列计算（如 `deal_price = "open"` 时基于开盘价判定触板）；因此 `limit_buy`/`limit_sell` 不能脱离 `deal_price` 预计算，在行情注入 Exchange 时按 deal_price 计算。`limit_threshold / 0.1` 是容差比例：如 `0.0985` 表示达到当日实际涨停幅度的 98.5% 即判定触板（对 10% 板幅股票触发线为 9.85%，距涨停约 0.15 个百分点；对 20% 板幅为 19.7%），防止买入"接近涨停、实际无法成交"的股票。板幅由 `high_limit`/`low_limit` 对 `pre_close` 反推，天然兼容 5%（ST）/10%/20% 不同板幅及 tick 舍入，公式中的 `0.1` 仅为归一化基准。
+  其中 `change` 使用 `deal_price` 参数对应的价格列计算（如 `deal_price = "open"` 时基于开盘价判定触板；**`deal_price = "vwapN" / "twapN"` 时基于对应窗口的方向 wap 价格判定**）；因此 `limit_buy`/`limit_sell` 不能脱离 `deal_price` 预计算，在行情注入 Exchange 时按 deal_price 计算。`limit_threshold / 0.1` 是容差比例：如 `0.0985` 表示达到当日实际涨停幅度的 98.5% 即判定触板（对 10% 板幅股票触发线为 9.85%，距涨停约 0.15 个百分点；对 20% 板幅为 19.7%），防止买入"接近涨停、实际无法成交"的股票。板幅由 `high_limit`/`low_limit` 对 `pre_close` 反推，天然兼容 5%（ST）/10%/20% 不同板幅及 tick 舍入，公式中的 `0.1` 仅为归一化基准。
 
 - `limit_buy = true` 时不可买入，`limit_sell = true` 时不可卖出；停牌（`paused = 1` 或 `close` 缺失）一律不可交易。**判定顺序：先停牌，后涨跌停**。停牌日的行情行常为同值 OHLC（`high_limit = low_limit = close`），其 limit 预计算会得到 `change = 0 ≥ up_chg = 0` 即 `limit_buy = true` 的无意义结果，必须由停牌检查先行拦截。
 
@@ -616,6 +622,41 @@ cost_price /= factor_ratio                  // 除权导致成本价降低
 | `benchmark`  | 当日收益率  |
 
 一个文件可包含多个基准指数；`BTData::load_benchmark` 全部加载，`gen_report(name)` 按映射表选定其中一个计算基准收益与超额收益（名称不在映射表中返回 `Err`）；便捷入口 `gen_report_default()` 等价于 `gen_report("zz1000", "arithmetic")`。
+
+### wap.csv / wap.parquet —— 时段 VWAP/TWAP 数据
+
+WAP 模式（`deal_price = "vwapN" / "twapN"，N = 1..=11）的专用数据文件，提供每个固定窗口的方向价格与方向成交量。文件键为 `(datetime, instrument)`，须与 `stock_bar` 键同序（不要求全量覆盖，缺失键在 wap 模式下视为不可交易）。支持 CSV 与 parquet（按扩展名识别），parquet 加载时按 N 投影只读 6 列。
+
+| 字段 | 含义 |
+| --- | --- |
+| `datetime` | 交易日期 |
+| `instrument` | 股票代码 |
+| `wap_N_vwap_buy` | 该窗口买入侧 VWAP 价 |
+| `wap_N_vwap_sell` | 该窗口卖出侧 VWAP 价 |
+| `wap_N_twap_buy` | 该窗口买入侧 TWAP 价 |
+| `wap_N_twap_sell` | 该窗口卖出侧 TWAP 价 |
+| `wap_N_buy_volume` | 该窗口买入侧成交量（股） |
+| `wap_N_sell_volume` | 该窗口卖出侧成交量（股） |
+
+- N 取值 1..=11，对应以下固定日内窗口（`deal_price = "vwapN"` 用该窗口的 `wap_N_vwap_buy/sell` 列，`"twapN"` 用 `wap_N_twap_buy/sell` 列）：
+
+| 时段号 N | 窗口（左闭右开） | `deal_price` 取值 |
+| --- | --- | --- |
+| 1 | 09:30:00 – 09:35:00 | `vwap1` / `twap1` |
+| 2 | 09:30:00 – 09:45:00 | `vwap2` / `twap2` |
+| 3 | 09:30:00 – 10:00:00 | `vwap3` / `twap3` |
+| 4 | 09:30:00 – 10:30:00 | `vwap4` / `twap4` |
+| 5 | 14:00:00 – 14:56:59 | `vwap5` / `twap5` |
+| 6 | 14:30:00 – 14:56:59 | `vwap6` / `twap6` |
+| 7 | 14:45:00 – 14:56:59 | `vwap7` / `twap7` |
+| 8 | 14:55:00 – 14:56:59 | `vwap8` / `twap8` |
+| 9 | 09:30:00 – 11:30:00 | `vwap9` / `twap9` |
+| 10 | 13:00:00 – 14:56:59 | `vwap10` / `twap10` |
+| 11 | 09:30:00 – 14:56:59 | `vwap11` / `twap11` |
+
+- 方向价 ≤ 0 / 缺失 / NaN 表示该方向在该窗口无成交 tick，该方向不可成交；
+- 方向量 ≤ 0 时该方向可成交量为 0；
+- `volume_threshold` 在 wap 模式下分别作用于 `buy_volume`（买入上限）与 `sell_volume`（卖出上限）。
 
 ### pred.csv —— 预测信号
 

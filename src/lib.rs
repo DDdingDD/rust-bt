@@ -35,5 +35,5 @@ pub use signal::{load_signal, signal_from_dataframe, Signal, SignalDay};
 pub use strategy::{PostSellContext, Strategy, StrategyContext, TopkDropoutStrategy};
 pub use types::{
     format_instrument, parse_instrument, BenchmarkName, Code, DayIdx, DealPrice, ExcessMethod,
-    StockTradable, TradableInfo,
+    StockTradable, TradableInfo, WapKind,
 };

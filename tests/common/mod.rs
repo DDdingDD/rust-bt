@@ -123,6 +123,60 @@ pub fn bench_rows<'a>(dates: &[&'a str], value: f64) -> Vec<(&'a str, &'static s
     dates.iter().map(|d| (*d, "SH000852", value)).collect()
 }
 
+/// 合成 wap 行（对应单一 window N 的 6 列）。
+#[derive(Clone)]
+pub struct WapRow {
+    pub date: &'static str,
+    pub inst: &'static str,
+    pub vwap_buy: f64,
+    pub vwap_sell: f64,
+    pub twap_buy: f64,
+    pub twap_sell: f64,
+    pub buy_volume: f64,
+    pub sell_volume: f64,
+}
+
+impl WapRow {
+    /// 常规行：方向价均 = 10，方向量均 = 1_000_000。
+    pub fn new(date: &'static str, inst: &'static str) -> Self {
+        Self {
+            date,
+            inst,
+            vwap_buy: 10.0,
+            vwap_sell: 10.0,
+            twap_buy: 10.0,
+            twap_sell: 10.0,
+            buy_volume: 1_000_000.0,
+            sell_volume: 1_000_000.0,
+        }
+    }
+}
+
+/// 写 wap.csv：包含 window N 对应的 6 列。未在 rows 中出现的 (date, code) 在 wap 模式下视为不可交易。
+pub fn write_wap(dir: &Path, window: u8, rows: &[WapRow]) -> PathBuf {
+    let prefix = format!("wap_{window}");
+    let mut s = String::from(
+        "datetime,instrument,"
+    );
+    s.push_str(&format!("{prefix}_vwap_buy,{prefix}_vwap_sell,{prefix}_twap_buy,{prefix}_twap_sell,{prefix}_buy_volume,{prefix}_sell_volume\n"));
+    for r in rows {
+        s.push_str(&format!(
+            "{},{},{},{},{},{},{},{}\n",
+            r.date,
+            r.inst,
+            fnum(r.vwap_buy),
+            fnum(r.vwap_sell),
+            fnum(r.twap_buy),
+            fnum(r.twap_sell),
+            fnum(r.buy_volume),
+            fnum(r.sell_volume)
+        ));
+    }
+    let p = dir.join("wap.csv");
+    fs::write(&p, s).unwrap();
+    p
+}
+
 /// 回测参数（默认零成本零滑点，便于手算）。
 pub struct Params {
     pub cash: f64,
@@ -140,6 +194,8 @@ pub struct Params {
     pub end: String,
     pub with_benchmark: bool,
     pub progress: bool,
+    /// wap 时段数据路径；deal_price 为 vwapN/twapN 时由 run_bt_with 自动加载
+    pub wap: Option<String>,
 }
 
 impl Default for Params {
@@ -160,6 +216,7 @@ impl Default for Params {
             end: "2026-01-10".into(),
             with_benchmark: false,
             progress: false,
+            wap: None,
         }
     }
 }
@@ -178,9 +235,16 @@ pub fn run_bt_with(
     strategy: Box<dyn Strategy>,
 ) -> rust_bt::Result<BTResult> {
     let signal = load_signal(dir.path().join("pred.csv").to_str().unwrap()).unwrap();
-    let data = BTData::new()
+    let mut data = BTData::new()
         .load_stock_bar(dir.path().join("stock_bar.csv").to_str().unwrap())
         .unwrap();
+    // wap 模式自动加载 wap.csv（路径可由 params.wap 覆盖）
+    if let Ok(DealPrice::Wap { window, .. }) = DealPrice::parse(&params.deal_price) {
+        let wap_path = params.wap.as_deref().unwrap_or("wap.csv");
+        data = data
+            .load_wap(dir.path().join(wap_path).to_str().unwrap(), window)
+            .unwrap();
+    }
     let data = if params.with_benchmark {
         data.load_benchmark(dir.path().join("benchmark.csv").to_str().unwrap())
             .unwrap()
@@ -200,7 +264,9 @@ pub fn run_bt_with(
         params.limit_threshold,
     )
     .unwrap();
-    let mut bt = Backtest::new(data, account, exchange, strategy).with_progress(params.progress);
+    let mut bt = Backtest::new(data, account, exchange, strategy)
+        .unwrap()
+        .with_progress(params.progress);
     bt.run(&signal, &params.start, &params.end)
 }
 

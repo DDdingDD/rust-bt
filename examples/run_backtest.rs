@@ -48,7 +48,7 @@ fn main() -> anyhow::Result<()> {
     let strategy: Box<dyn Strategy> = Box::new(TopkDropoutStrategy::new(top_n, drop_n));
 
     // 7. 运行回测（with_progress 启用终端进度条，默认关闭）
-    let mut backtest = Backtest::new(data, account, exchange, strategy).with_progress(true);
+    let mut backtest = Backtest::new(data, account, exchange, strategy)?.with_progress(true);
     let bt_result = backtest.run(&signal, start_date, end_date)?;
 
     // 8. 输出结果：统一写入 output/（已 gitignore，避免产物散落仓库根目录）
