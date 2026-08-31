@@ -1,8 +1,9 @@
 //! TopkDropoutStrategy（规范"内置策略"）。
 //!
 //! 目标持仓：预测分数最高的 `top_n` 只股票。每个有信号可用的交易日调仓一次：
-//! 卖出当前持仓中 score 最差的 `drop_n` 只，再按 `n_buy = top_n − 卖出后保留持仓数`
-//! 等权买入新股票。两阶段核减（卖不掉继续占坑）由 Backtest 编排、trait 默认钩子执行。
+//! 当日无 score 的持仓全部卖出（不占 drop_n 名额），再从其余持仓中卖出 score
+//! 最差的 `drop_n` 只，然后按 `n_buy = top_n − 卖出后保留持仓数` 等权买入新股票。
+//! 两阶段核减（卖不掉继续占坑）由 Backtest 编排、trait 默认钩子执行。
 
 use std::collections::HashMap;
 
@@ -68,21 +69,32 @@ impl Strategy for TopkDropoutStrategy {
         let score_of: HashMap<Code, f64> = ctx.signal.as_map();
 
         // ---- 1. 卖出（method_sell = "bottom"）----
-        // 持仓中当日无信号的股票不参与排名、不卖出
-        let mut sell_rank: Vec<(Code, f64)> = ctx
-            .positions
-            .keys()
-            .filter_map(|c| score_of.get(c).map(|s| (*c, *s)))
-            .collect();
+        // 当日无 score 的持仓全部卖出（不占 drop_n 名额）；
+        // 其余持仓按 score 升序取最差 drop_n 只卖出
+        let mut no_score: Vec<Code> = Vec::new();
+        let mut sell_rank: Vec<(Code, f64)> = Vec::new();
+        for c in ctx.positions.keys() {
+            match score_of.get(c) {
+                Some(s) => sell_rank.push((*c, *s)),
+                None => no_score.push(*c),
+            }
+        }
         if self.only_tradable {
             // 不可交易股票不进入卖单、不参与排名，留到下一调仓日
-            sell_rank.retain(|(c, _)| ctx.tradable.get(*c).is_some_and(|t| t.sellable()));
+            let sellable = |c: &Code| ctx.tradable.get(*c).is_some_and(|t| t.sellable());
+            no_score.retain(sellable);
+            sell_rank.retain(|(c, _)| sellable(c));
         }
+        // 无 score 组按代码升序保证确定性；有 score 组按 score 升序、同分按代码
+        no_score.sort_unstable();
         common::sort_by_score_asc(&mut sell_rank);
-        let sell_orders: Vec<Order> = sell_rank
+        let sell_codes: Vec<Code> = no_score
+            .into_iter()
+            .chain(sell_rank.iter().take(self.drop_n).map(|(c, _)| *c))
+            .collect();
+        let sell_orders: Vec<Order> = sell_codes
             .iter()
-            .take(self.drop_n)
-            .map(|(c, _)| {
+            .map(|c| {
                 let volume = ctx.positions[c].volume;
                 // 委托价格取当日 deal_price 列；当日无行情 / 无效时用最近有效收盘价兜底
                 // （此类卖单会被撮合层裁为 0，价格不参与成交）

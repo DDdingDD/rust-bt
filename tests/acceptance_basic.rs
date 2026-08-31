@@ -93,6 +93,60 @@ fn build_and_rebalance() {
 }
 
 #[test]
+fn sell_holding_without_score() {
+    // 新口径：信号日存在但持仓股无 score -> 全部卖出，不占 drop_n 名额
+    // - d1 建仓 A、B 各 5000 股（pred d0: A=3 B=2）
+    // - pred d2: B=2 C=3（A 掉出信号）-> d3：A 无 score 额外卖出；
+    //   有 score 持仓仅 B，bottom drop_n=1 卖 B；kept=0，n_buy=2，
+    //   候选仅 C -> 金额 = (0 + 50000 + 50000) / 1 = 100000 -> 买 C 10000 股
+    let dir = TempDir::new().unwrap();
+    let mut bars = Vec::new();
+    for d in D {
+        for inst in ["SH600001", "SH600002", "SZ000001"] {
+            bars.push(Bar::new(d, inst));
+        }
+    }
+    write_stock_bar(dir.path(), &bars);
+    write_pred(
+        dir.path(),
+        &[
+            (D[0], "SH600001", 3.0),
+            (D[0], "SH600002", 2.0),
+            (D[2], "SH600002", 2.0),
+            (D[2], "SZ000001", 3.0),
+        ],
+    );
+    let r = run_bt(&dir, &Params::default());
+
+    let t = r.trades();
+    assert_eq!(t.len(), 5);
+    check_trade(&t[0], 1, "SH600001", Side::Buy, 5000.0, 10.0, 5000.0, 10.0, 0.0);
+    check_trade(&t[1], 1, "SH600002", Side::Buy, 5000.0, 10.0, 5000.0, 10.0, 0.0);
+    // d3：无 score 的 A 先卖（代码升序确定性），再卖 bottom 1 的 B，最后买 C
+    check_trade(&t[2], 3, "SH600001", Side::Sell, 5000.0, 10.0, 5000.0, 10.0, 0.0);
+    check_trade(&t[3], 3, "SH600002", Side::Sell, 5000.0, 10.0, 5000.0, 10.0, 0.0);
+    check_trade(&t[4], 3, "SZ000001", Side::Buy, 10000.0, 10.0, 10000.0, 10.0, 0.0);
+
+    check_daily(
+        &r,
+        &[
+            (100_000.0, 0.0, 100_000.0),       // d0 空仓
+            (100_000.0, 100_000.0, 0.0),       // d1 建仓
+            (100_000.0, 100_000.0, 0.0),       // d2 无信号持有
+            (100_000.0, 100_000.0, 0.0),       // d3 卖 A、B 买 C
+            (100_000.0, 100_000.0, 0.0),       // d4 持有
+        ],
+    );
+
+    // A、B d3 起清仓；C d3 建仓
+    assert!(hist_row(&r, 3, "SH600001").is_none());
+    assert!(hist_row(&r, 3, "SH600002").is_none());
+    assert_eq!(hist_row(&r, 3, "SZ000001").unwrap().count_day, 1);
+    assert_eq!(hist_row(&r, 4, "SZ000001").unwrap().count_day, 2);
+    assert_positions_cap(&r, 2);
+}
+
+#[test]
 fn report_metrics() {
     let (dir, params) = setup(true);
     let r = run_bt(&dir, &params);
