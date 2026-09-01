@@ -3,8 +3,10 @@
 //! 信息边界编译期化：策略只拿到 `StrategyContext`，可见字段即全部可见信息。
 
 pub mod common;
+pub mod topk;
 pub mod topk_dropout;
 
+pub use topk::TopkStrategy;
 pub use topk_dropout::TopkDropoutStrategy;
 
 use crate::error::Result;

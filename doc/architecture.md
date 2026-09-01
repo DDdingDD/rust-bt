@@ -57,8 +57,8 @@ rust-bt/
 ├── Cargo.toml
 ├── src/
 │   ├── lib.rs                  # 公开 re-export（load_signal, Signal, BTData, Account, Exchange,
-│   │                           #  Backtest, Strategy, TopkDropoutStrategy, BTResult, Report,
-│   │                           #  Decision, Order 等实现自定义策略所需类型；api 层 run/BtParams 等）
+│   │                           #  Backtest, Strategy, TopkDropoutStrategy, TopkStrategy, BTResult,
+│   │                           #  Report, Decision, Order 等实现自定义策略所需类型；api 层 run/BtParams 等）
 │   ├── error.rs                # BtError（thiserror 类型化错误，见 §8）
 │   ├── types.rs                # DayIdx、DealPrice、ExcessMethod、BenchmarkName、instrument 编解码、
 │   │                           #  TradableInfo/StockTradable（strategy 与 exchange 共用，见 §4.6）
@@ -80,7 +80,8 @@ rust-bt/
 │   ├── strategy/
 │   │   ├── mod.rs              # Strategy trait、StrategyContext、PostSellContext
 │   │   ├── common.rs           # 可复用构件：排名（同分字典序）、等权资金分配、金额->股数换算
-│   │   └── topk_dropout.rs     # TopkDropoutStrategy
+│   │   ├── topk_dropout.rs     # TopkDropoutStrategy
+│   │   └── topk.rs             # TopkStrategy（每日持有 score 前 top_n 只，跌出才卖出）
 │   ├── backtest.rs             # Backtest：主循环、两阶段撮合编排、延期校验、进度条与耗时
 │   ├── result.rs               # BTResult：hist_position / trades 导出、gen_report
 │   ├── api.rs                  # 嵌入 API（§4.10）：run / BtParams / StrategySpec / ExchangeParams /
@@ -287,7 +288,7 @@ pub trait Strategy {
 
     /// 阶段一（卖出全部撮合完成）之后、阶段二（买入撮合）之前的买单修正钩子。
     /// 默认实现：按 Decision.target_positions 截断买单（None 则原样返回）——
-    /// 即 TopkDropout 的核减语义，TopkDropout 无需覆写。
+    /// 即 TopkDropout / Topk 的核减语义，两者均无需覆写。
     /// 需要其他语义的策略（如"按卖出实际回款重新分配买单金额"）覆写本方法；
     /// 可见信息均为 T_exec 日合法信息（卖出成交结果当日可得、回款当日可用），不破坏信息边界。
     fn revise_buy_orders(
@@ -431,13 +432,14 @@ pub struct BtParams {
     pub stock_bar: String, pub benchmark: String, pub wap: Option<String>, // wap 时段数据路径：deal_price = vwapN/twapN 时必填
     pub start_date: String, pub end_date: String,
     pub initial_cash: f64,
-    pub strategy: StrategySpec,                          // TopkDropout{..} 参数化或 Custom(Box<dyn Strategy>)
+    pub strategy: StrategySpec,                          // TopkDropout{..} / Topk{..} 参数化或 Custom(Box<dyn Strategy>)
     pub exchange: ExchangeParams,                        // deal_price: DealPrice 枚举，Default 对齐 CLI 默认
     pub benchmark_name: BenchmarkName, pub excess_method: ExcessMethod,
     pub progress: bool,
 }
 pub enum StrategySpec {
     TopkDropout { top_n: usize, drop_n: usize, only_tradable: bool, forbid_st: bool },
+    Topk { top_n: usize, forbid_st: bool },
     Custom(Box<dyn Strategy>),
 }
 pub struct BtOutput { pub result: BTResult, pub report: Report }

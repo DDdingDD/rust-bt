@@ -23,7 +23,7 @@ use crate::exchange::Exchange;
 use crate::report::Report;
 use crate::result::BTResult;
 use crate::signal::{Signal, SignalDay};
-use crate::strategy::{Strategy, TopkDropoutStrategy};
+use crate::strategy::{Strategy, TopkDropoutStrategy, TopkStrategy};
 use crate::types::{BenchmarkName, DealPrice, ExcessMethod};
 
 /// 高层回测参数。行情与基准从 CSV 路径加载（每次 `run` 重新读取），
@@ -42,7 +42,7 @@ pub struct BtParams {
     pub end_date: String,
     /// 期初资金（须为正的有限值）。
     pub initial_cash: f64,
-    /// 策略：内置 topk_dropout 参数化，或注入 `Box<dyn Strategy>` 自定义实现。
+    /// 策略：内置 topk_dropout / topk 参数化，或注入 `Box<dyn Strategy>` 自定义实现。
     pub strategy: StrategySpec,
     /// 撮合与成本参数（默认值对齐 `config.example.yml`）。
     pub exchange: ExchangeParams,
@@ -54,7 +54,7 @@ pub struct BtParams {
     pub progress: bool,
 }
 
-/// 策略规格：内置 topk_dropout 或自定义策略注入。
+/// 策略规格：内置 topk_dropout / topk 或自定义策略注入。
 pub enum StrategySpec {
     /// 内置 topk_dropout（参数语义同 `TopkDropoutStrategy`）。
     TopkDropout {
@@ -63,6 +63,8 @@ pub enum StrategySpec {
         only_tradable: bool,
         forbid_st: bool,
     },
+    /// 内置 topk（参数语义同 `TopkStrategy`）：每日持有 score 前 top_n 只。
+    Topk { top_n: usize, forbid_st: bool },
     /// 自定义策略（`run` 会消耗该 Box 装配进 `Backtest`，如需复用请自行重建）。
     Custom(Box<dyn Strategy>),
 }
@@ -82,6 +84,11 @@ impl std::fmt::Debug for StrategySpec {
                 .field("only_tradable", only_tradable)
                 .field("forbid_st", forbid_st)
                 .finish(),
+            Self::Topk { top_n, forbid_st } => f
+                .debug_struct("Topk")
+                .field("top_n", top_n)
+                .field("forbid_st", forbid_st)
+                .finish(),
             Self::Custom(_) => f.debug_tuple("Custom").field(&"<dyn Strategy>").finish(),
         }
     }
@@ -94,6 +101,14 @@ impl StrategySpec {
             top_n,
             drop_n,
             only_tradable: false,
+            forbid_st: false,
+        }
+    }
+
+    /// topk 快捷方式（`forbid_st` 默认 false）。
+    pub fn topk(top_n: usize) -> Self {
+        Self::Topk {
+            top_n,
             forbid_st: false,
         }
     }
@@ -199,12 +214,16 @@ pub fn run(params: BtParams, signal: &Signal) -> Result<BtOutput> {
             params.initial_cash
         )));
     }
-    if let StrategySpec::TopkDropout { top_n, .. } = &params.strategy {
-        if *top_n < 1 {
-            return Err(BtError::InvalidParam(format!(
-                "top_n 须 >= 1，收到: {top_n}"
-            )));
+    let bad_top_n = match &params.strategy {
+        StrategySpec::TopkDropout { top_n, .. } | StrategySpec::Topk { top_n, .. } => {
+            Some(*top_n).filter(|n| *n < 1)
         }
+        StrategySpec::Custom(_) => None,
+    };
+    if let Some(top_n) = bad_top_n {
+        return Err(BtError::InvalidParam(format!(
+            "top_n 须 >= 1，收到: {top_n}"
+        )));
     }
 
     // 2. 装配（Exchange::new 的费用 / 阈值校验同样先于数据加载）
@@ -220,6 +239,9 @@ pub fn run(params: BtParams, signal: &Signal) -> Result<BtOutput> {
                 .with_forbid_st(forbid_st),
         ),
         StrategySpec::Custom(s) => s,
+        StrategySpec::Topk { top_n, forbid_st } => {
+            Box::new(TopkStrategy::new(top_n).with_forbid_st(forbid_st))
+        }
     };
     let exchange = Exchange::with_deal_price(
         params.exchange.deal_price,

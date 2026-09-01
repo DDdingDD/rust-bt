@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 
 use chrono::NaiveDate;
 use common::*;
-use rust_bt::{api, BtParams, DealPrice, ExportNames, ExchangeParams, StrategySpec, TopkDropoutStrategy, WapKind};
+use rust_bt::{api, BtParams, DealPrice, ExportNames, ExchangeParams, StrategySpec, TopkDropoutStrategy, TopkStrategy, WapKind};
 use tempfile::TempDir;
 
 const D: [&str; 5] = [
@@ -147,6 +147,26 @@ fn custom_strategy_spec_matches_builtin_topk() {
             &dir,
             StrategySpec::Custom(Box::new(TopkDropoutStrategy::new(2, 1))),
         ),
+        &in_memory_signal(),
+    )
+    .unwrap();
+
+    assert_daily_same(&custom.result, &builtin.result);
+    assert_trades_same(&custom.result, &builtin.result);
+}
+
+#[test]
+fn custom_strategy_spec_matches_builtin_topk_hold() {
+    // StrategySpec::Topk 与 Custom(TopkStrategy) 口径一致（两层共用装配路径）
+    let (dir, _) = setup(true);
+
+    let builtin = api::run(
+        api_params(&dir, StrategySpec::topk(2)),
+        &in_memory_signal(),
+    )
+    .unwrap();
+    let custom = api::run(
+        api_params(&dir, StrategySpec::Custom(Box::new(TopkStrategy::new(2)))),
         &in_memory_signal(),
     )
     .unwrap();

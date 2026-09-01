@@ -83,7 +83,7 @@ bt config.yml          # 或 cargo run --release --bin bt -- config.yml
 - 参数仅一个位置参数：配置文件路径；缺省打印用法并以退出码 2 退出。
 - 完整字段与默认值见仓库根目录 `config.example.yml`（带注释）。**必填**仅信号路径（`signal`）、行情数据路径（`data.stock_bar` / `data.benchmark`）与回测区间（`period.start_date` / `period.end_date`）；`data.wap` 在 `exchange.deal_price` 为 `vwapN` / `twapN`（N = 1..=11）时必填。其余字段省略时取默认值（即上文示例代码中的取值：1000 万资金、top_n=drop_n=100、open 成交、万 1.5/万 6.5 费率等）。
 - `exchange.volume_threshold` / `exchange.limit_threshold` 写 `null` 表示不限制。
-- 报错：必填字段缺失时报错并指明字段名；`strategy.name` 目前仅接受 `topk_dropout`，其他值报错。
+- 报错：必填字段缺失时报错并指明字段名；`strategy.name` 接受 `topk_dropout` / `topk`，其他值报错。
 - 输出：`output.dir` 目录（默认 `output/`，自动创建）下生成 hist_position / trades / report_data / report_plot 四个产物，文件名可配置。
 
 ### 嵌入调用（api::run）
@@ -193,8 +193,8 @@ impl Report {
 fn run(params: BtParams, signal: &Signal) -> anyhow::Result<BtOutput>;
 fn run_from_signal_file(params: BtParams, signal_path: &str) -> anyhow::Result<BtOutput>;
 
-// 参数：StrategySpec 为 TopkDropout{top_n, drop_n, only_tradable, forbid_st} 或
-// Custom(Box<dyn Strategy>)；ExchangeParams 默认值与 CLI 一致
+// 参数：StrategySpec 为 TopkDropout{top_n, drop_n, only_tradable, forbid_st} /
+// Topk{top_n, forbid_st} 或 Custom(Box<dyn Strategy>)；ExchangeParams 默认值与 CLI 一致
 fn signal_from_pairs(days: BTreeMap<NaiveDate, Vec<(String, f64)>>) -> anyhow::Result<Signal>;
 
 // 内存信号构造（口径同 load_signal：同日重复报错、不可解析/NaN 丢弃 + warning）
@@ -466,6 +466,53 @@ cost_price /= factor_ratio                  // 除权导致成本价降低
 | `drop_n`        | int  | —       | 每个调仓日计划卖出的只数                                                                                                                                                                              |
 | `only_tradable` | bool | `false` | 卖出候选是否限定当日可交易股票；两种模式的买入只数公式相同（`top_n − 卖出成交后持仓数`，见第 2/4 条）。`false`：排名与卖单包含不可交易股票，其卖单成交为 0、保留持仓并占坑（第 4 条核减买单）；`true`：不可交易股票（如跌停）不进入卖单、不参与排名，留到下一调仓日再卖。实际区别在于"末位 `drop_n` 名"里跌停股是否挤掉可交易股的名额 |
 | `forbid_st`     | bool | `false` | 是否过滤 ST 股：`true` 时调仓日 `is_st = 1` 的股票不可买入；只限制买入，已持有的 ST 股照常卖出                                                                                                                             |
+
+### TopkStrategy
+
+目标持仓：每日持有预测分数最高的 `top_n` 只股票（不可交易的除外）。与 TopkDropout 的差异：排名跌出 `top_n` 的持仓才卖出，仍在 `top_n` 内的持仓**原样保留**——不每日轮换、不因"已持有"而被排除出买入候选。每个**有信号可用的交易日**调仓一次，规则如下：
+
+1. **目标集合**：排名宇宙 = 当日有 `score` 且（当前已持有 **或** 当日可买入）的股票，按 `score` 降序取前 `top_n` 只（同分按 `instrument` 字典序，代码小者优先）。未持有且当日不可交易（停牌/涨停/无量）的股票不进宇宙、不占 `top_n` 名额；已持有的股票即使当日停牌/涨停也参与排名（避免"停牌一天就被卖出"）。
+
+2. **卖出**：当前持仓中不在目标集合内的股票**全部卖出**（含当日无 `score` 的持仓）。卖不掉的（停牌/跌停/成交量裁剪）成交为 0、保留持仓并继续占 `top_n` 名额，由 Backtest 两阶段编排核减买单（同 TopkDropout 第 4 条）。
+
+3. **买入**：目标集合中未持有的股票（按构造必然当日可买入），按 `score` 降序等权买入：每单金额 =（可用现金 + 计划卖出全部成交的预期回款）/ 买入只数；预期回款为毛额口径（同 TopkDropout 第 3 条），金额一次性确定、核减只丢单不重新分配。
+
+4. **边界情况**：同 TopkDropout——候选不足 `top_n` 时持有全部候选；某日无信号不调仓；整手取整剩余现金留存；持仓数已不少于 `top_n`（历史超配）时不生成买单，仅按第 2 条卖出。
+
+策略参数：
+
+| 参数        | 类型 | 默认    | 含义                                                                                     |
+| --------- | ---- | ----- | -------------------------------------------------------------------------------------- |
+| `top_n`   | int  | —     | 目标持仓只数                                                                                 |
+| `forbid_st` | bool | `false` | 是否过滤 ST 股：`true` 时未持有的 ST 股不进排名宇宙（不可买入）；已持有的 ST 股照常参与排名（`forbid_st` 只限制买入） |
+
+YAML 配置：`strategy.name: "topk"`（`drop_n` / `only_tradable` 仅 topk_dropout 使用，topk 下忽略）。
+
+### TopkDropout 与 Topk 的语义差异（选型说明）
+
+两策略目标都是"跟踪 score 前 `top_n` 只"，但驱动方式不同，任何参数下都**不严格等价**：
+
+| 维度 | TopkDropout | Topk |
+| --- | --- | --- |
+| 卖出集合 | 无 score 持仓全部 + 有 score 持仓中最差的 `drop_n` 只 | 持仓 ∩ 不在目标集合（集合差分） |
+| 买入候选 | 未持有 ∧ 有 score ∧ 可买入，取前 `n_buy` 只 | 目标集合 \ 持仓（目标集合先行确定） |
+| top_n 内的已有持仓 | 可能被 drop_n 卖出，且当日**不会买回**（候选排除已持有） | 原样保留，不生成任何订单 |
+| 权重口径 | 新买入按当日金额等权；保留持仓漂移 | 同左（仅买入时等权，之后漂移） |
+| 换手率控制 | `drop_n` 直接限速（每日最多换 drop_n 只） | 无限速，排名变动多少换多少 |
+| 排名宇宙 | 买入侧仅可买入股 | 已持有 ∪ 可买入（停牌/涨停持仓仍参与排名） |
+
+`drop_n` 取极端值时的行为（两者差异的具体化）：
+
+- **`drop_n = top_n = N`**：每日全换仓，但**不是**"持有 top-N"。有 score 的持仓全部进入卖出名单，而买入候选排除已持有股——当日 top-N 里的持仓股被卖掉后买不回来，被排名 N 之后的股票替代，持仓在 top-N 与其后继排名间振荡。
+- **`drop_n = 0`**：只进不出的惰性组合。持仓股只要还有 score（哪怕排名已跌出 top-N）就永远持有，仅在信号完全消失时腾出名额补新——也不是"持有 top-N"。
+- **经典用法 `drop_n` 较小（如 1）**：每日只换掉最差的一只，持仓向 top-N **缓慢收敛**，有滞后——这是 qlib TopkDropout 的原意：用滞后换低换手。
+
+一个自然的改造问题是：Dropout 买入候选去掉"未持有"过滤、置 `drop_n = top_n`，再对同名股票的卖买单做**抵消**（先卖后买变净额），是否等价于 Topk？答案是否定的，抵消消除了往返成本与回补风险，但剩两点结构性差异：
+
+1. **涨停持仓被错卖**：改造版买入候选只含可买入股，涨停（可卖不可买）的持仓进不了候选、抵消不掉，卖单成交且当日买不回；Topk 的排名宇宙含已持有股，涨停持仓在 top_n 内时不生成卖单，一路持有。
+2. **买单金额按虚高回款分配**：Dropout 每单金额 =（现金 + 全部卖出预期回款）/ N，抵消掉重叠卖单后回款并未发生，现金不足时靠撮合反解裁剪，排在后面的买单可能成交 0（持仓不满 N 只）；Topk 按（现金 + 实际卖出回款）/ 实际买入只数分配，资金恰好用尽。要消除该差异须抵消后重新等权分配——逐条修完即 Topk 的实现。
+
+**选型**：要低换手、接受跟踪滞后（经典 qlib 语义）用 `topk_dropout`；要严格跟踪"每日 score 前 N 只（不可交易除外）"用 `topk`。
 
 ---
 

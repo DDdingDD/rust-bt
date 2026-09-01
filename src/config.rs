@@ -54,9 +54,9 @@ impl BtConfig {
         if !cash.is_finite() || cash <= 0.0 {
             return Err(anyhow!("account.initial_cash 须为正数，收到: {cash}"));
         }
-        if self.strategy.name != "topk_dropout" {
+        if !matches!(self.strategy.name.as_str(), "topk_dropout" | "topk") {
             return Err(anyhow!(
-                "未知策略: {}（当前仅支持 topk_dropout）",
+                "未知策略: {}（当前支持 topk_dropout / topk）",
                 self.strategy.name
             ));
         }
@@ -129,6 +129,10 @@ impl BtConfig {
                 top_n: self.strategy.top_n,
                 drop_n: self.strategy.drop_n,
                 only_tradable: self.strategy.only_tradable,
+                forbid_st: self.strategy.forbid_st,
+            },
+            "topk" => StrategySpec::Topk {
+                top_n: self.strategy.top_n,
                 forbid_st: self.strategy.forbid_st,
             },
             other => anyhow::bail!("未知策略: {other}"),
@@ -218,13 +222,13 @@ impl Default for AccountConfig {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct StrategyConfig {
-    /// 策略名（当前仅支持 "topk_dropout"）。
+    /// 策略名（"topk_dropout" / "topk"）。
     pub name: String,
     /// 目标持仓只数。
     pub top_n: usize,
-    /// 每个调仓日计划卖出的只数。
+    /// 每个调仓日计划卖出的只数（仅 topk_dropout 使用）。
     pub drop_n: usize,
-    /// 仅买入当日可交易（非停牌/涨跌停）的股票。
+    /// 卖出候选是否限定当日可交易股票（仅 topk_dropout 使用）。
     pub only_tradable: bool,
     /// 禁止买入 ST 股。
     pub forbid_st: bool,
@@ -439,6 +443,20 @@ progress: false
         let yaml = MINIMAL_YAML.replace("period:", "strategy:\n  name: \"momentum\"\nperiod:");
         let err = parse(&yaml).unwrap_err().to_string();
         assert!(err.contains("momentum"), "报错应含策略名: {err}");
+    }
+
+    #[test]
+    fn topk_strategy_maps_to_spec() {
+        let yaml = format!("{MINIMAL_YAML}strategy:\n  name: \"topk\"\n  top_n: 30\n  forbid_st: true\n");
+        let cfg = parse(&yaml).unwrap();
+        let params = cfg.to_params().unwrap();
+        match params.strategy {
+            crate::api::StrategySpec::Topk { top_n, forbid_st } => {
+                assert_eq!(top_n, 30);
+                assert!(forbid_st);
+            }
+            other => panic!("期望 StrategySpec::Topk，实际: {other:?}"),
+        }
     }
 
     #[test]

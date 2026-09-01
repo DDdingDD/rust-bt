@@ -22,12 +22,13 @@ period:
 account:
   initial_cash: 10000000.0           # 期初资金（1000 万）
 
-# 策略（当前仅支持 topk_dropout）
+# 策略：topk_dropout（每日卖出最差 drop_n 只持仓再补买）或
+#       topk（每日持有 score 前 top_n 只，跌出才卖出）
 strategy:
   name: "topk_dropout"
   top_n: 100                         # 目标持仓只数
-  drop_n: 100                        # 每个调仓日计划卖出的只数
-  only_tradable: false               # 仅买入当日可交易的股票
+  drop_n: 100                        # 每个调仓日计划卖出的只数（仅 topk_dropout）
+  only_tradable: false               # 卖出候选限定当日可交易股票（仅 topk_dropout）
   forbid_st: false                   # 禁止买入 ST 股
 
 # 交易所（撮合与成本）

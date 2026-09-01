@@ -90,7 +90,7 @@ fn main() -> anyhow::Result<()> {
 | 类型 | 说明 |
 | --- | --- |
 | `BtParams` | 回测参数（§4） |
-| `StrategySpec` | 策略规格：`TopkDropout{..}` 参数化 / `Custom(Box<dyn Strategy>)` 注入 |
+| `StrategySpec` | 策略规格：`TopkDropout{..}` / `Topk{..}` 参数化 / `Custom(Box<dyn Strategy>)` 注入 |
 | `ExchangeParams` | 撮合与成本参数（实现 `Default`，默认值对齐 CLI） |
 | `BtOutput` | 回测输出：`result: BTResult` + `report: Report`（§6） |
 | `ExportNames` | 导出产物文件名（实现 `Default`） |
@@ -142,6 +142,7 @@ fn main() -> anyhow::Result<()> {
 ```rust
 pub enum StrategySpec {
     TopkDropout { top_n: usize, drop_n: usize, only_tradable: bool, forbid_st: bool },
+    Topk { top_n: usize, forbid_st: bool },
     Custom(Box<dyn Strategy>),
 }
 ```
@@ -149,6 +150,9 @@ pub enum StrategySpec {
 - `StrategySpec::topk_dropout(top_n, drop_n)`：快捷构造（`only_tradable` / `forbid_st` 为 false）。
   语义：目标持仓为 score 最高的 `top_n` 只；每个有信号的交易日卖出持仓中 score
   最差的 `drop_n` 只，再等权买入新股票补足。
+- `StrategySpec::topk(top_n)`：快捷构造（`forbid_st` 为 false）。
+  语义：每日持有 score 最高的 `top_n` 只（不可交易的除外）；跌出 `top_n`
+  的持仓才卖出，仍在 `top_n` 内的持仓原样保留，不每日轮换。
 - `Custom(...)`：注入自定义策略（实现 `Strategy` trait，见 §8）。`run` 会**消耗**
   该 Box（装配进 `Backtest`）；跨多次回测复用同一策略实例请每次重新构造。
 

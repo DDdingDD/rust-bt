@@ -32,7 +32,7 @@ pub use position::{PositionEntry, Positions};
 pub use report::{DerivedStats, Report};
 pub use result::BTResult;
 pub use signal::{load_signal, signal_from_dataframe, Signal, SignalDay};
-pub use strategy::{PostSellContext, Strategy, StrategyContext, TopkDropoutStrategy};
+pub use strategy::{PostSellContext, Strategy, StrategyContext, TopkDropoutStrategy, TopkStrategy};
 pub use types::{
     format_instrument, parse_instrument, BenchmarkName, Code, DayIdx, DealPrice, ExcessMethod,
     StockTradable, TradableInfo, WapKind,
