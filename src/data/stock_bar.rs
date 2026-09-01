@@ -189,7 +189,11 @@ impl StockBarStore {
             log::warn!("stock_bar: is_st 缺失 {is_st_missing} 行，按 0 处理");
         }
 
-        // 行级硬校验（缺失值以 NaN 表示，仅校验非缺失值）
+        // 行级硬校验：
+        // - OHLC 为有效价格时必须 >0 且有限；
+        // - volume 非缺失时必须 >=0 且有限；
+        // - factor 必须 >0 且有限（复权依赖该列）；
+        // - limit / pre_close / vwap 仅拒绝非有限值（NaN/0/负值由下游按"缺失/不可交易"处理）。
         for (i, &c) in codes.iter().enumerate() {
             for (name, col) in [
                 ("open", &open),
@@ -198,9 +202,9 @@ impl StockBarStore {
                 ("low", &low),
             ] {
                 let v = col[i];
-                if !v.is_nan() && v <= 0.0 {
+                if !v.is_nan() && (!v.is_finite() || v <= 0.0) {
                     return Err(BtError::Validation(format!(
-                        "stock_bar 行 {i}（code={c}）{name} = {v} <= 0"
+                        "stock_bar 行 {i}（code={c}）{name} = {v} 非法（非正/非有限）"
                     )));
                 }
             }
@@ -210,16 +214,29 @@ impl StockBarStore {
                     high[i], low[i]
                 )));
             }
-            if !volume[i].is_nan() && volume[i] < 0.0 {
+            for (name, col) in [
+                ("high_limit", &high_limit),
+                ("low_limit", &low_limit),
+                ("pre_close", &pre_close),
+                ("vwap", &vwap),
+            ] {
+                let v = col[i];
+                if !v.is_nan() && !v.is_finite() {
+                    return Err(BtError::Validation(format!(
+                        "stock_bar 行 {i}（code={c}）{name} = {v} 非法（非有限）"
+                    )));
+                }
+            }
+            if !volume[i].is_nan() && (!volume[i].is_finite() || volume[i] < 0.0) {
                 return Err(BtError::Validation(format!(
-                    "stock_bar 行 {i}（code={c}）volume = {} < 0",
+                    "stock_bar 行 {i}（code={c}）volume = {} 非法（负/非有限）",
                     volume[i]
                 )));
             }
-            // factor 缺失 / NaN / <= 0 -> 报错（复权依赖该列）
-            if factor[i].is_nan() || factor[i] <= 0.0 {
+            // factor 缺失 / 非有限 / <= 0 -> 报错（复权依赖该列）
+            if !factor[i].is_finite() || factor[i] <= 0.0 {
                 return Err(BtError::Validation(format!(
-                    "stock_bar 行 {i}（code={c}）factor = {} 非法（缺失/NaN/<=0）",
+                    "stock_bar 行 {i}（code={c}）factor = {} 非法（缺失/非有限/<=0）",
                     factor[i]
                 )));
             }
@@ -350,5 +367,49 @@ mod tests {
         assert_eq!(store.calendar.date(1).to_string(), "2026-01-06");
         assert_eq!(store.day_range(0), 0..2);
         assert_eq!(store.day_range(1), 2..4);
+    }
+
+    #[test]
+    fn rejects_non_finite_values() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("stock_bar.csv");
+        let base = |extra: String| {
+            format!(
+                "datetime,instrument,open,close,low,high,volume,money,factor,high_limit,low_limit,avg,pre_close,paused,is_st,vwap\n\
+                 2026-01-05,SH600001,10,10,9,11,1000,10000,1,11,9,10,10,0,0,10\n{extra}"
+            )
+        };
+        std::fs::write(
+            &path,
+            base("2026-01-05,SH600002,inf,10,9,11,1000,10000,1,11,9,10,10,0,0,10\n".into()),
+        )
+        .unwrap();
+        let err = match StockBarStore::load(&path) {
+            Ok(_) => panic!("open=inf 应报错"),
+            Err(e) => e.to_string(),
+        };
+        assert!(err.contains("open") && err.contains("有限"), "{err}");
+
+        std::fs::write(
+            &path,
+            base("2026-01-05,SH600002,10,10,9,11,inf,10000,1,11,9,10,10,0,0,10\n".into()),
+        )
+        .unwrap();
+        let err = match StockBarStore::load(&path) {
+            Ok(_) => panic!("volume=inf 应报错"),
+            Err(e) => e.to_string(),
+        };
+        assert!(err.contains("volume") && err.contains("有限"), "{err}");
+
+        std::fs::write(
+            &path,
+            base("2026-01-05,SH600002,10,10,9,11,1000,10000,inf,11,9,10,10,0,0,10\n".into()),
+        )
+        .unwrap();
+        let err = match StockBarStore::load(&path) {
+            Ok(_) => panic!("factor=inf 应报错"),
+            Err(e) => e.to_string(),
+        };
+        assert!(err.contains("factor") && err.contains("有限"), "{err}");
     }
 }

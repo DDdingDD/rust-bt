@@ -77,21 +77,23 @@ impl Exchange {
             ("fixed_slippage", fixed_slippage),
             ("min_slippage_ratio", min_slippage_ratio),
         ] {
-            if !(v >= 0.0) || v.is_nan() {
-                return Err(BtError::InvalidParam(format!("{name} 须为非负数，收到: {v}")));
+            if !v.is_finite() || v < 0.0 {
+                return Err(BtError::InvalidParam(format!(
+                    "{name} 须为非负有限值，收到: {v}"
+                )));
             }
         }
         if let Some(t) = volume_threshold {
-            if !(t >= 0.0) || t.is_nan() {
+            if !t.is_finite() || t < 0.0 {
                 return Err(BtError::InvalidParam(format!(
-                    "volume_threshold 须为非负数，收到: {t}"
+                    "volume_threshold 须为非负有限值，收到: {t}"
                 )));
             }
         }
         match limit_threshold {
-            Some(t) if !(t > 0.0 && t <= 0.1) || t.is_nan() => {
+            Some(t) if !t.is_finite() || !(t > 0.0 && t <= 0.1) => {
                 return Err(BtError::InvalidParam(format!(
-                    "limit_threshold 须在 (0, 0.1] 区间，收到: {t}"
+                    "limit_threshold 须在 (0, 0.1] 区间且为有限值，收到: {t}"
                 )));
             }
             None => {
@@ -283,5 +285,73 @@ impl Exchange {
         order.deal_price = deal_price;
         order.deal_cost = cost;
         account.on_deal(order, &view);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ok_params() -> (DealPrice, f64, f64, f64, f64, f64, Option<f64>, Option<f64>) {
+        (
+            DealPrice::Open,
+            0.00015,
+            0.00065,
+            5.0,
+            0.01,
+            0.0014,
+            Some(0.5),
+            Some(0.0985),
+        )
+    }
+
+    #[test]
+    fn rejects_infinite_costs() {
+        for bad in [f64::INFINITY, f64::NEG_INFINITY] {
+            for (name, v) in [
+                ("open_cost", bad),
+                ("close_cost", bad),
+                ("min_cost", bad),
+                ("fixed_slippage", bad),
+                ("min_slippage_ratio", bad),
+            ] {
+                let mut p = ok_params();
+                match name {
+                    "open_cost" => p.1 = v,
+                    "close_cost" => p.2 = v,
+                    "min_cost" => p.3 = v,
+                    "fixed_slippage" => p.4 = v,
+                    "min_slippage_ratio" => p.5 = v,
+                    _ => unreachable!(),
+                }
+                let err = match Exchange::with_deal_price(p.0, p.1, p.2, p.3, p.4, p.5, p.6, p.7) {
+                    Ok(_) => panic!("{name}={v} 应报错"),
+                    Err(e) => e.to_string(),
+                };
+                assert!(err.contains(name) && err.contains("有限"), "{name}={v}: {err}");
+            }
+        }
+    }
+
+    #[test]
+    fn rejects_infinite_volume_threshold() {
+        let p = ok_params();
+        let err = match Exchange::with_deal_price(p.0, p.1, p.2, p.3, p.4, p.5, Some(f64::INFINITY), p.7) {
+            Ok(_) => panic!("volume_threshold=inf 应报错"),
+            Err(e) => e.to_string(),
+        };
+        assert!(err.contains("volume_threshold") && err.contains("有限"), "{err}");
+    }
+
+    #[test]
+    fn rejects_infinite_limit_threshold() {
+        let p = ok_params();
+        for bad in [f64::INFINITY, f64::NEG_INFINITY] {
+            let err = match Exchange::with_deal_price(p.0, p.1, p.2, p.3, p.4, p.5, p.6, Some(bad)) {
+                Ok(_) => panic!("limit_threshold={bad} 应报错"),
+                Err(e) => e.to_string(),
+            };
+            assert!(err.contains("limit_threshold") && err.contains("有限"), "{bad}: {err}");
+        }
     }
 }

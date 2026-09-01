@@ -47,8 +47,12 @@ pub struct Account {
 }
 
 impl Account {
-    /// 期初全现金。
+    /// 期初全现金。`cash` 须为正有限值。
     pub fn new(cash: f64) -> Self {
+        assert!(
+            cash.is_finite() && cash > 0.0,
+            "Account::new 期初现金须为正有限值，收到: {cash}"
+        );
         Self {
             cash,
             positions: Positions::new(),
@@ -132,6 +136,12 @@ impl Account {
                 self.positions.remove(&order.stock);
             }
             // 部分卖出：cost_price / count_day 不变
+        } else {
+            log::warn!(
+                "on_deal: 卖出委托 {}{} 但持仓中无该股票，忽略",
+                order.deal_volume,
+                order.stock
+            );
         }
     }
 

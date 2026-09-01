@@ -12,11 +12,12 @@ pub fn slippage_ratio(fixed_slippage: f64, min_slippage_ratio: f64, trade_price:
 
 /// 按方向调整成交价：买得更贵、卖得更便宜。
 /// 不 clamp 到涨跌停价（触板由 limit_buy / limit_sell 在撮合前拦截）。
+/// 卖出侧额外 clamp 到 [0, +∞)，防止极端低价股 / 过大固定滑点导致负成交价。
 pub fn apply_slippage(trade_price: f64, adj_price_ratio: f64, is_buy: bool) -> f64 {
     if is_buy {
         trade_price * (1.0 + adj_price_ratio)
     } else {
-        trade_price * (1.0 - adj_price_ratio)
+        (trade_price * (1.0 - adj_price_ratio)).max(0.0)
     }
 }
 
@@ -112,6 +113,9 @@ mod tests {
         // 方向
         assert!((apply_slippage(10.0, 0.001, true) - 10.01).abs() < 1e-12);
         assert!((apply_slippage(10.0, 0.001, false) - 9.99).abs() < 1e-12);
+        // 卖出侧下限：固定滑点 0.01 对股价 0.005 时 ratio=2，不 clamp 会得到 -0.005
+        assert_eq!(apply_slippage(0.005, 2.0, false), 0.0);
+        assert!((apply_slippage(0.005, 2.0, true) - 0.015).abs() < 1e-12);
     }
 
     #[test]

@@ -329,7 +329,12 @@ pub fn signal_from_pairs(
 ) -> Result<Signal> {
     let mut out = BTreeMap::new();
     for (date, pairs) in days {
-        out.insert(date, SignalDay::from_pairs(pairs)?);
+        let day = SignalDay::from_pairs(pairs)?;
+        // 与 CSV 加载层口径一致：全日无效（无法解析 / score 非有限）时不生成该日条目，
+        // 避免 Backtest::run 中作为空 SignalDay 被策略误判为清仓信号。
+        if !day.is_empty() {
+            out.insert(date, day);
+        }
     }
     Ok(Signal::from_days(out))
 }

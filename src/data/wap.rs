@@ -110,16 +110,17 @@ impl WapStore {
         let old_codes = std::mem::take(&mut codes);
         let codes: Vec<Code> = order.iter().map(|i| old_codes[*i]).collect();
 
-        // 行级硬校验：volume 非负（缺失 NaN 放行为 0 量，价格缺失 / <= 0 放行为该方向不可成交）
+        // 行级硬校验：volume 非负且有限（缺失 NaN / Inf 放行为 0 量，价格缺失 / <= 0 放行
+        // 为该方向不可成交）
         for (i, &c) in codes.iter().enumerate() {
             for (name, col) in [
                 ("buy_volume", &buy_volume),
                 ("sell_volume", &sell_volume),
             ] {
-                if !col[i].is_nan() && col[i] < 0.0 {
+                let v = col[i];
+                if !v.is_nan() && (!v.is_finite() || v < 0.0) {
                     return Err(BtError::Validation(format!(
-                        "wap 数据行 {i}（code={c}）{name} = {} < 0",
-                        col[i]
+                        "wap 数据行 {i}（code={c}）{name} = {v} 非法（负/非有限）"
                     )));
                 }
             }
@@ -272,5 +273,18 @@ mod tests {
         );
         let err = WapStore::load(&path, 11).unwrap_err().to_string();
         assert!(err.contains("buy_volume"), "{err}");
+    }
+
+    #[test]
+    fn rejects_infinite_volume() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("wap.csv");
+        write_wap_csv(
+            &path,
+            11,
+            "2026-01-05,SH600001,10.5,9.5,10.4,9.6,inf,120\n",
+        );
+        let err = WapStore::load(&path, 11).unwrap_err().to_string();
+        assert!(err.contains("buy_volume") && err.contains("有限"), "{err}");
     }
 }

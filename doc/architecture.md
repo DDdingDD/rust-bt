@@ -252,7 +252,7 @@ struct DailyRecord {
 
 账户职责（对应规范"回测主循环时序"第 2/4/5 步）：
 
-- `adjust_factor(day_market)`：撮合前，对当日 `factor ≠ last_factor`（epsilon 比较）的持仓做 `volume ×= ratio; cost_price /= ratio; last_factor 更新`。当日新买入尚未入账，天然不参与。
+- `adjust_factor(day_market)`：撮合前，对当日 `factor ≠ last_factor`（epsilon 比较）的持仓做 `volume ×= ratio; cost_price /= ratio; price /= ratio; last_factor 更新`。`price` 同步调整保证停牌除权日市值连续；有有效收盘价的交易日 `end_of_day` 会覆盖 `price`。当日新买入尚未入账，天然不参与。
 - `on_deal(order, day)`：成交落账——现金增减（含费用）、`PositionEntry` 更新（买入 `cost_price` = 含滑点成交价，费用不摊入；`last_factor` 记当日 factor；`count_day` 新买入记 1）、累加当日 `turnover_amount` 与 `cost`。
 - `end_of_day(day_market, day)`：估值——有有效行情（未停牌且 close > 0）的持仓更新 `price`，停牌/退市沿用；`account = cash + Σ(volume × price)`；`count_day +1`（当日新买入已在 `on_deal` 记 1，不重复）；push `DailyRecord` 与持仓快照。
 - 双资产口径：`V'_t = V_t + cum_cost_t` 在 Report 层由 `DailyRecord.account + 累计 cost` 派生，账户无需维护第二条完整序列，只需逐日记录 `cost`。
@@ -308,7 +308,7 @@ pub struct PostSellContext<'a> {
 }
 ```
 
-`TopkDropoutStrategy { top_n, drop_n, only_tradable, forbid_st }`（构造入口 `new(top_n, drop_n)`：`only_tradable` / `forbid_st` 默认 `false`，builder 方法覆写）：按规范"内置策略"实现排名、卖出、资金分配（毛额口径预期回款、一次性确定金额不重新分配），`Decision.target_positions = Some(top_n)`，买单按 score 降序、同分按 code 升序（字典序确定性），核减使用 trait 默认钩子。排名、同分比较、等权分配、金额→股数换算等通用逻辑实现于 `strategy/common.rs`，供后续新策略复用。无信号日不调仓由引擎保证（§4.8 主循环 a 步），策略无需处理。
+`TopkDropoutStrategy { top_n, drop_n, only_tradable, forbid_st }`（构造入口 `new(top_n, drop_n)`：`only_tradable` / `forbid_st` 默认 `false`，builder 方法覆写）：按规范"内置策略"实现排名、卖出、资金分配（毛额口径预期回款、一次性确定金额），`Decision.target_positions = Some(top_n)`，买单按 score 降序、同分按内部 `code` 升序（`SZ` 代码 < `SH` 主板代码，确定性），核减使用 trait 默认钩子。默认钩子在丢弃多余买单后，将剩余买单按实际可用现金重新等权分配。排名、同分比较、等权分配、金额→股数换算等通用逻辑实现于 `strategy/common.rs`，供后续新策略复用。无信号日不调仓由引擎保证（§4.8 主循环 a 步），策略无需处理。
 
 `top_n` 与 `drop_n` 为独立参数，不要求相等：`top_n=100, drop_n=50` 即"持有 100 只、每日轮换最差的 50 只"的半仓轮动用法，`n_buy = top_n − 保留持仓数` 公式与两阶段核减天然兼容。构造期校验 `top_n ≥ 1`、`drop_n ≥ 0`；`drop_n > top_n` 不报错但 warning（退化为每日清空排名内持仓再重建，行为确定但通常非预期）。
 
@@ -341,7 +341,7 @@ impl Exchange {
 3. 涨跌停检查               -> 买单 limit_buy / 卖单 limit_sell -> 0
 4. 成交量裁剪               -> min(|volume|, volume_cap)；当日无量 -> 0
 5. 卖出截断至持仓量（warning）
-6. 滑点                     -> adj_ratio = max(min_slippage_ratio, fixed/price)，按方向调整，不 clamp
+6. 滑点                     -> adj_ratio = max(min_slippage_ratio, fixed/price)，按方向调整；卖出侧 clamp 到 [0, +∞)，防止极端低价股/过大滑点导致负成交价
 7. 买单资金反解（两 regime，取可行解较大者；用滑点后价格；现金连 min_cost 都不足 -> 0）
 8. 整手取整                 -> 买入 100 股；SH688/SH689 按 1 股取整、不足 200 股归零；卖出不取整
 9. 费用                     -> max(val × ratio, min_cost)；volume = 0 时费用 0
@@ -358,12 +358,13 @@ pub struct Backtest { data: BTData, account: Account, exchange: Exchange, strate
                       progress: bool /* 终端进度条开关，默认 false（D12） */,
                       has_run: bool /* run 单次性守卫：首次运行消耗账户 / 基准 / 逐日记录（take 语义），二次调用 Err */ }
 impl Backtest {
-    pub fn new(data: BTData, account: Account, exchange: Exchange, strategy: Box<dyn Strategy>) -> Self;
-    // new 内完成：exchange 注入行情（按 deal_price 预计算 limit 列）
+    pub fn new(data: BTData, account: Account, exchange: Exchange, strategy: Box<dyn Strategy>) -> Result<Self>;
+    // new 内完成：校验 BTData 含 stock_bar；exchange 注入行情（按 deal_price 预计算 limit 列）
     /// 进度条开关（默认关闭）：启用后 run 期间向 stderr 渲染按交易日推进的进度条，
     /// 总数 = 对齐区间交易日数（启动校验后确定），结束行显示总耗时（D12）
     pub fn with_progress(self, enabled: bool) -> Self;
-    /// 只能调用一次；二次调用返回 Err（InvalidParam），再次回测需重新装配
+    /// 只能调用一次；启动校验通过后设置 has_run = true，此前失败不影响二次调用；
+    /// 二次调用返回 Err（InvalidParam），再次回测需重新装配
     pub fn run(&mut self, signal: &Signal, start_date: &str, end_date: &str) -> Result<BTResult>;
 }
 ```
@@ -372,7 +373,8 @@ impl Backtest {
 
 ```text
 0. 启动校验：日历区间对齐（Err 规则见规范）；
-   信号延期校验（datetime 不在日历 / instrument 无行情 -> 丢弃 + warning）
+   信号延期校验（datetime 不在日历 / instrument 无行情 -> 丢弃 + warning）；
+   校验通过后设置 has_run = true，此前失败不影响二次调用
    计时与进度：Instant::now() 记起点；progress = true 时创建进度条（stderr，总数 = 区间交易日数）
 1. for day in 对齐区间:
    a. 取 T−1 日 SignalDay；无 -> 本日不产生任何订单（引擎级保证，规范主循环第 1 步），
@@ -384,7 +386,8 @@ impl Backtest {
    d. 阶段一：逐单 deal_order(sell)                   // 卖单全部撮合，回款当日可用
       每笔订单（含 deal_volume = 0 的未成交单）追加到 trades 日志
    e. 核减：buy_orders = strategy.revise_buy_orders(decision.buy_orders, post_sell_ctx)
-      // 默认实现按 target_positions 截断；被核减丢弃的买单未进入撮合，不产生 trades 行
+      // 默认实现按 target_positions 截断；若实际发生丢弃，剩余买单按实际可用现金重新等权分配
+      // 被核减丢弃的买单未进入撮合，不产生 trades 行
    f. 阶段二：按序逐单 deal_order(buy)                // 优先级高者优先获得资金
       每笔订单（含 deal_volume = 0 的未成交单）追加到 trades 日志
    g. account.end_of_day(day_market, day)             // 估值 + 逐日记录 + 持仓快照

@@ -48,7 +48,11 @@ impl Backtest {
             benchmark,
             wap,
         } = data;
-        let stock_bar = stock_bar.expect("BTData::build 已校验 stock_bar 存在");
+        let Some(stock_bar) = stock_bar else {
+            return Err(BtError::InvalidParam(
+                "Backtest::new 需要 stock_bar 数据，请先调用 BTData::load_stock_bar".into(),
+            ));
+        };
         let calendar = stock_bar.calendar.clone();
         exchange.inject_market(stock_bar, wap)?;
         let initial_cash = account.cash();
@@ -82,8 +86,9 @@ impl Backtest {
                     .into(),
             ));
         }
-        self.has_run = true;
         let timer = Instant::now();
+
+        // ---- 0. 启动校验 ----
 
         // ---- 0. 启动校验 ----
         let range = self.calendar.align(start_date, end_date)?;
@@ -108,10 +113,11 @@ impl Backtest {
                     dropped_instrument += 1;
                 }
             }
-            signals.insert(
-                day,
-                SignalDay { codes, scores },
-            );
+            // 若过滤后当日无有效信号，视同无信号日：不插入 map，
+            // 下一交易日不会收到空 SignalDay，避免策略误判为“全市场无 score”而清仓。
+            if !codes.is_empty() {
+                signals.insert(day, SignalDay { codes, scores });
+            }
         }
         if dropped_date > 0 {
             log::warn!("pred: datetime 不在交易日历中，丢弃 {dropped_date} 个信号日");
@@ -119,6 +125,9 @@ impl Backtest {
         if dropped_instrument > 0 {
             log::warn!("pred: instrument 无行情数据，丢弃 {dropped_instrument} 条信号");
         }
+
+        // 启动校验通过，标记已运行（此前报错不影响二次调用）
+        self.has_run = true;
 
         // 进度条：stderr 渲染；总日数 = 对齐区间交易日数（启动校验后即知）
         let n_days = range.len();

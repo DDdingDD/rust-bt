@@ -145,6 +145,28 @@ impl BtConfig {
                 }
             }
         }
+
+        // 输出路径：多配置时各配置的四类产物不能写入同一文件，防止静默覆盖
+        if configs.len() > 1 {
+            let mut seen: std::collections::HashMap<(String, String, String, String, String), &str> =
+                std::collections::HashMap::new();
+            for (path, cfg) in configs {
+                let key = (
+                    cfg.output.dir.clone(),
+                    cfg.output.hist_position.clone(),
+                    cfg.output.trades.clone(),
+                    cfg.output.report_data.clone(),
+                    cfg.output.report_plot.clone(),
+                );
+                if let Some(prev) = seen.get(&key) {
+                    anyhow::bail!(
+                        "多配置批量运行时输出产物冲突：{prev} 与 {path} 使用相同的 output.dir=\"{}\" 与文件名，后运行的配置会覆盖先运行的产物",
+                        cfg.output.dir
+                    );
+                }
+                seen.insert(key, path);
+            }
+        }
         Ok(())
     }
 
@@ -568,11 +590,26 @@ progress: false
 
     #[test]
     fn shareable_data_check() {
-        // 一致配置（含 wap 同时段）通过
         let a = parse(MINIMAL_YAML).unwrap();
-        let b = parse(&format!("{MINIMAL_YAML}strategy:\n  top_n: 30\n")).unwrap();
-        BtConfig::check_shareable_data(&[("a.yml", &a), ("b.yml", &b)]).unwrap();
 
+        // 单配置运行时即使输出路径相同也不冲突
+        BtConfig::check_shareable_data(&[("a.yml", &a)]).unwrap();
+
+        // 多配置需区分输出路径
+        let b = parse(&format!("{MINIMAL_YAML}strategy:\n  top_n: 30\n")).unwrap();
+        let err = BtConfig::check_shareable_data(&[("a.yml", &a), ("b.yml", &b)])
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("输出产物冲突") && err.contains("a.yml") && err.contains("b.yml"),
+            "{err}"
+        );
+
+        let b_yaml = format!("{MINIMAL_YAML}output:\n  dir: \"output_b\"\n");
+        let b_out = parse(&b_yaml).unwrap();
+        BtConfig::check_shareable_data(&[("a.yml", &a), ("b.yml", &b_out)]).unwrap();
+
+        // wap 配置间默认输出路径也冲突
         let wap_yaml = |window: u8| {
             MINIMAL_YAML.replace(
                 "  benchmark: \"tmp_data/benchmark.csv\"",
@@ -582,7 +619,8 @@ progress: false
             )
         };
         let w1 = parse(&wap_yaml(11)).unwrap();
-        let w2 = parse(&wap_yaml(11)).unwrap();
+        let w2_yaml = format!("{}output:\n  dir: \"output_w\"\n", wap_yaml(11));
+        let w2 = parse(&w2_yaml).unwrap();
         BtConfig::check_shareable_data(&[("w1.yml", &w1), ("w2.yml", &w2)]).unwrap();
 
         // stock_bar 不一致 -> 报错并指出冲突配置
@@ -599,7 +637,9 @@ progress: false
             .to_string();
         assert!(err.contains("wap 时段") && err.contains("w3.yml"), "{err}");
 
-        // wap 与非 wap 配置混跑允许（非 wap 配置不提供 data.wap，单配置校验已保证）
-        BtConfig::check_shareable_data(&[("a.yml", &a), ("w1.yml", &w1)]).unwrap();
+        // wap 与非 wap 配置混跑允许（非 wap 配置不提供 data.wap，单配置校验已保证），
+        // 但输出路径仍须不同
+        BtConfig::check_shareable_data(&[("a.yml", &a), ("w1.yml", &w2)]).unwrap();
+
     }
 }

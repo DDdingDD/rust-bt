@@ -166,8 +166,8 @@ pub fn signal_from_dataframe(df: &DataFrame) -> Result<Signal> {
     let mut dropped_score = 0usize;
     let mut dropped_instrument = 0usize;
     for ((d, inst), score) in dates.iter().zip(&instruments).zip(&scores) {
-        // score 为 NaN / 缺失 -> 丢弃 + warning
-        if score.is_nan() {
+        // score 为 NaN / Inf / 缺失 -> 丢弃 + warning
+        if !score.is_finite() {
             dropped_score += 1;
             continue;
         }
@@ -187,7 +187,7 @@ pub fn signal_from_dataframe(df: &DataFrame) -> Result<Signal> {
         entry.scores.push(*score);
     }
     if dropped_score > 0 {
-        log::warn!("pred: score 缺失/NaN，丢弃 {dropped_score} 条信号");
+        log::warn!("pred: score 缺失/非有限值，丢弃 {dropped_score} 条信号");
     }
     if dropped_instrument > 0 {
         log::warn!("pred: instrument 无法按 SH/SZ 规则编码，丢弃 {dropped_instrument} 条信号");
@@ -259,5 +259,31 @@ mod tests {
                 .unwrap();
         let err = signal_from_dataframe(&df).unwrap_err();
         assert!(err.to_string().contains("instrument"), "{err}");
+    }
+
+    #[test]
+    fn from_dataframe_drops_infinite_scores() {
+        let df = pred_df(
+            vec!["2026-01-05", "2026-01-05", "2026-01-05"],
+            vec!["SH600001", "SH600002", "SH600003"],
+            vec![1.0, f64::INFINITY, f64::NEG_INFINITY],
+            vec![0.0; 3],
+        );
+        let sig = signal_from_dataframe(&df).unwrap();
+        let day = sig.get(&parse_date("2026-01-05").unwrap()).unwrap();
+        assert_eq!(day.codes, vec![600001]);
+        assert_eq!(day.scores, vec![1.0]);
+    }
+
+    #[test]
+    fn from_pairs_drops_infinite_scores() {
+        let day = SignalDay::from_pairs(vec![
+            ("SH600001".to_string(), 1.0),
+            ("SH600002".to_string(), f64::INFINITY),
+            ("SH600003".to_string(), f64::NEG_INFINITY),
+        ])
+        .unwrap();
+        assert_eq!(day.codes, vec![600001]);
+        assert_eq!(day.scores, vec![1.0]);
     }
 }

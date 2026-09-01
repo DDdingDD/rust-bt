@@ -32,7 +32,10 @@ impl PositionEntry {
 /// 单只持仓的 factor 复权调整（规范"复权处理"）。
 ///
 /// `factor_today` 为当日行情 factor；与持仓自身 `last_factor` 不同（epsilon 比较）时：
-/// `volume ×= factor_today / last_factor`，`cost_price /= ratio`，并更新 `last_factor`。
+/// `volume ×= factor_today / last_factor`，`cost_price /= ratio`，`price /= ratio`，
+/// 并更新 `last_factor`。`price` 同步调整是为了保证：在当日无有效收盘价（停牌行）
+/// 的除权日，`end_of_day` 不会刷新 price，市值仍按复权后价格连续；有有效收盘价时
+/// `end_of_day` 会覆盖 price，因此不影响正常交易日。
 /// 返回是否发生了调整。
 pub fn adjust_entry_factor(entry: &mut PositionEntry, factor_today: f64) -> bool {
     let ratio = factor_today / entry.last_factor;
@@ -41,6 +44,7 @@ pub fn adjust_entry_factor(entry: &mut PositionEntry, factor_today: f64) -> bool
     }
     entry.volume *= ratio;
     entry.cost_price /= ratio;
+    entry.price /= ratio;
     entry.last_factor = factor_today;
     true
 }

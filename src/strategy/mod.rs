@@ -53,14 +53,114 @@ pub trait Strategy {
     ///
     /// 默认实现：按 `Decision.target_positions` 截断买单（None 则原样返回）——
     /// 即 TopkDropout 的核减语义（`top_n − 卖出成交后实际持仓数`，从尾部丢弃）。
+    /// 当实际发生核减（保留数 < 原买单数）时，将剩余买单重新等权分配实际可用现金
+    /// `after_sell.cash`，避免被截断的买单仍按原 n_buy 口径只使用部分资金。
     /// 需要其他核减语义的策略覆写本方法。
     fn revise_buy_orders(&self, buys: Vec<Order>, after_sell: &PostSellContext) -> Result<Vec<Order>> {
         Ok(match after_sell.target_positions {
             Some(target) => {
                 let keep = target.saturating_sub(after_sell.positions.len());
-                buys.into_iter().take(keep).collect()
+                if keep == 0 || keep >= buys.len() {
+                    // 未发生有效核减：直接返回（空或全保留）
+                    return Ok(buys.into_iter().take(keep).collect());
+                }
+                let mut kept: Vec<Order> = buys.into_iter().take(keep).collect();
+                let cash = after_sell.cash;
+                if cash > 0.0 {
+                    let per = cash / kept.len() as f64;
+                    for o in &mut kept {
+                        if o.price.is_finite() && o.price > 0.0 {
+                            o.volume = per / o.price;
+                        } else {
+                            o.volume = 0.0;
+                        }
+                    }
+                } else {
+                    for o in &mut kept {
+                        o.volume = 0.0;
+                    }
+                }
+                kept
             }
             None => buys,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::order::Order;
+    use crate::position::Positions;
+
+    struct DummyStrategy;
+
+    impl Strategy for DummyStrategy {
+        fn gen_decision(&mut self,
+            _ctx: &StrategyContext,
+        ) -> crate::error::Result<Decision> {
+            Ok(Decision::default())
+        }
+    }
+
+    #[test]
+    fn revise_renormalizes_on_truncation() {
+        // 原 2 只买单各按 50000 元生成；核减为 1 只后应使用全部 100000 元
+        let buys = vec![
+            Order::new(600_001, 5000.0, 10.0), //  intending 50000
+            Order::new(600_002, 2500.0, 20.0), //  intending 50000
+        ];
+        let positions = Positions::new();
+        let tradable = TradableInfo {
+            codes: &[],
+            suspended: &[],
+            limit_buy: &[],
+            limit_sell: &[],
+            volume_cap: &[],
+            sell_volume_cap: &[],
+            deal_price: &[],
+            is_st: &[],
+        };
+        let ctx = PostSellContext {
+            positions: &positions,
+            cash: 100_000.0,
+            tradable,
+            filled_sells: &[],
+            target_positions: Some(1),
+        };
+        let kept = DummyStrategy.revise_buy_orders(buys, &ctx).unwrap();
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].stock, 600_001);
+        assert!((kept[0].volume - 10_000.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn revise_no_truncation_keeps_volumes() {
+        let buys = vec![
+            Order::new(600_001, 5000.0, 10.0),
+            Order::new(600_002, 2500.0, 20.0),
+        ];
+        let positions = Positions::new();
+        let tradable = TradableInfo {
+            codes: &[],
+            suspended: &[],
+            limit_buy: &[],
+            limit_sell: &[],
+            volume_cap: &[],
+            sell_volume_cap: &[],
+            deal_price: &[],
+            is_st: &[],
+        };
+        let ctx = PostSellContext {
+            positions: &positions,
+            cash: 100_000.0,
+            tradable,
+            filled_sells: &[],
+            target_positions: Some(2),
+        };
+        let kept = DummyStrategy.revise_buy_orders(buys, &ctx).unwrap();
+        assert_eq!(kept.len(), 2);
+        assert!((kept[0].volume - 5000.0).abs() < 1e-9);
+        assert!((kept[1].volume - 2500.0).abs() < 1e-9);
     }
 }
