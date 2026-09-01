@@ -154,13 +154,14 @@ pub struct StockBarStore {
     day_offsets: Vec<(u32, u32)>,        // 每个交易日 (start_row, len)，O(1) 取当日切片
 }
 
-pub struct BTData { /* stock_bar: Option<StockBarStore>, wap: Option<WapStore>, benchmark: Option<DataFrame>, calendar: TradingCalendar */ }
+/// BTData 内部以 Arc 持有三份存储（D15：Clone 廉价，同一份数据可跨多次回测共享）
+pub struct BTData { /* stock_bar: Option<Arc<StockBarStore>>, wap: Option<Arc<WapStore>>, benchmark: Option<Arc<BenchmarkStore>> */ }
 impl BTData {
     pub fn new() -> Self;
     pub fn load_stock_bar(self, path: &str) -> Result<Self>;   // 结构校验（见规范校验表）；CSV/parquet 按扩展名识别
     pub fn load_wap(self, path: &str, window: u8) -> Result<Self>; // vwapN/twapN 时段数据；parquet 按列投影只读 6 列
     pub fn load_benchmark(self, path: &str) -> Result<Self>;
-    pub fn build(self) -> Result<Self>;                        // 统一校验 + 构建交易日历 + 日索引
+    pub fn build(self) -> Result<Self>;                        // 统一校验（stock_bar 必需）
 }
 ```
 
@@ -347,7 +348,7 @@ impl Exchange {
 10. 回填 + account.on_deal
 ```
 
-`rules.rs` 中滑点 / 费用 / 反解 / 取整均为**纯函数**，是单元测试的主要标的。`market.rs` 在注入时预计算 `limit_buy` / `limit_sell`（缺失分支按规范区分：`pre_close` 缺失如上市首日属常态，仅置 false 不告警；`high_limit` / `low_limit` 自身缺失才置 false 并 warning），并提供按日 SoA 视图与 `TradableInfo` 构建（Exchange 与 Strategy 共用同一份当日数据，保证口径一致）。
+`rules.rs` 中滑点 / 费用 / 反解 / 取整均为**纯函数**，是单元测试的主要标的。`market.rs` 在注入时预计算 `limit_buy` / `limit_sell`（缺失分支按规范区分：`pre_close` 缺失如上市首日属常态，仅置 false 不告警；`high_limit` / `low_limit` 自身缺失才置 false 并 warning），并提供按日 SoA 视图与 `TradableInfo` 构建（Exchange 与 Strategy 共用同一份当日数据，保证口径一致）。`DailyMarketStore` 以 `Arc<StockBarStore>` 持有原始行情（D15）：跨回测共享的只有原始数据，limit / 量上限 / 方向基价等派生列随每次 `inject_market` 按当前撮合参数重建。
 
 ### 4.8 Backtest
 
@@ -428,8 +429,13 @@ Report 另提供全部绘图序列的只读访问器（`dates` / `metrics` / `cu
 ### 4.10 嵌入 API（api.rs）
 
 ```rust
+pub struct DataPaths { pub stock_bar: String, pub benchmark: String, pub wap: Option<String> }
+pub enum DataSource {                                  // wap 时段数据路径：deal_price = vwapN/twapN 时必填
+    Paths(DataPaths),                                  // 每次 run 重新加载
+    Shared(BTData),                                    // 共享已加载数据（内部 Arc，clone 廉价），参数扫描免重载（D15）
+}
 pub struct BtParams {
-    pub stock_bar: String, pub benchmark: String, pub wap: Option<String>, // wap 时段数据路径：deal_price = vwapN/twapN 时必填
+    pub data: DataSource,
     pub start_date: String, pub end_date: String,
     pub initial_cash: f64,
     pub strategy: StrategySpec,                          // TopkDropout{..} / Topk{..} 参数化或 Custom(Box<dyn Strategy>)
@@ -450,7 +456,7 @@ pub fn run_from_signal_file(params: BtParams, signal_path: &str) -> Result<BtOut
 pub fn signal_from_pairs(days: BTreeMap<NaiveDate, Vec<(String, f64)>>) -> Result<Signal>;
 ```
 
-`run` 内部流程与组件层等价：数值参数校验 -> 装配（`Exchange::new` 费用/阈值校验）-> 加载数据 -> 主循环 -> `gen_report`，校验先于数百 MB 行情加载（fail fast）。CLI（`bt.rs`）与示例共享该路径：`BtConfig::to_params()` 转类型化参数后调 `run`，消除双份装配逻辑。
+`run` 内部流程与组件层等价：数值参数校验 -> 装配（`Exchange::new` 费用/阈值校验）-> 数据（Paths 加载 / Shared 复用，见 D15）-> 主循环 -> `gen_report`，校验先于数百 MB 行情加载（fail fast）。CLI（`bt.rs`）与示例共享该路径：`BtConfig::to_params()` 转类型化参数后调 `run`，消除双份装配逻辑。CLI 支持 `bt a.yml b.yml ...` 多配置批量：data 路径与 wap 时段一致性由 `BtConfig::check_shareable_data` 前置校验，数据加载一次、逐配置以 `DataSource::Shared` 运行。
 
 ---
 
@@ -470,8 +476,9 @@ pub fn signal_from_pairs(days: BTreeMap<NaiveDate, Vec<(String, f64)>>) -> Resul
 | D10 | 报告绘图：自包含 HTML（plotly.js basic bundle vendor 于 `assets/`、`include_str!` 内嵌，字符串模板手工拼 JSON）~~（原：plotters 直出 PNG，2026-08 取代）~~ | 交互式报告格式（7 面板：含/不含成本累计收益、两口径回撤、累计超额、换手率、两口径超额回撤 + 衍生指标表），可交互缩放/悬浮取值；手工拼 JSON 零新增 Rust 依赖、无前端构建；渲染为纯函数（`report/html.rs`）可无 fixture 直测。内嵌 basic bundle（仅 scatter/bar/pie，约 1.1MB）使单文件离线可开，代价为仓库/二进制/产物各 +1.1MB |
 | D11 | 错误分层：内部 `thiserror` 类型化 `BtError`，公开 API 返回 `anyhow::Result` | 与规范示例签名（`anyhow::Result`）一致；内部保留错误分类（数据校验/日历/非法参数/撮合）便于测试断言与调用方 downcast |
 | D12 | 进度条与耗时：`with_progress` 开关（默认关闭）+ indicatif 渲染 stderr；耗时记 `BTResult.elapsed`，进度条结束行显示 | 库默认零终端输出（测试、无终端、输出重定向环境干净）；总日数在区间对齐后即知，进度与 ETA 确定；禁用时 `Option<ProgressBar>` 为 None、`Instant` 计时开销可忽略，不触碰主循环热路径（每交易日一次 `inc`，重绘由 indicatif 节流） |
-| D13 | 双层公开 API：高层便捷层 `api::run`（类型化 `BtParams` -> `BtOutput`）与组件 Facade 并存；CLI 经 `BtConfig::to_params` 复用高层层 | 嵌入方一次调用完成装配+回测+报告，参数用枚举（`DealPrice`/`BenchmarkName`/`ExcessMethod`）编译期杜绝拼写错误（YAML 层只能加载期校验）；信号支持内存构造（`SignalDay::from_pairs`，校验口径同 `load_signal`）；两层共用同一撮合与估值路径（集成测试对拍逐日账户与逐笔成交完全相等），CLI/示例/嵌入不再各维护一份装配逻辑。数据复用（参数扫描免重载行情）留待组件层后续演进（如 `Arc<StockBarStore>`） |
+| D13 | 双层公开 API：高层便捷层 `api::run`（类型化 `BtParams` -> `BtOutput`）与组件 Facade 并存；CLI 经 `BtConfig::to_params` 复用高层层 | 嵌入方一次调用完成装配+回测+报告，参数用枚举（`DealPrice`/`BenchmarkName`/`ExcessMethod`）编译期杜绝拼写错误（YAML 层只能加载期校验）；信号支持内存构造（`SignalDay::from_pairs`，校验口径同 `load_signal`）；两层共用同一撮合与估值路径（集成测试对拍逐日账户与逐笔成交完全相等），CLI/示例/嵌入不再各维护一份装配逻辑。数据复用（参数扫描免重载行情）由 D15 落地 |
 | D14 | WAP 时段价方向化：`deal_price = vwapN/twapN` 时，策略可见价取 `pre_close`（决策时点合法已知），撮合基价与量上限按方向取 wap 数据的 `_buy`/`_sell` 列；装配期校验 wap 时段与 deal_price 一致 | 支持日内固定窗口 VWAP/TWAP 回测，同时守住信息边界：策略不提前看到 wap 价格，交易所按方向真实价格与容量成交；方向量上限防止用全日容量高估单边成交 |
+| D15 | 多次回测共享数据：`BTData` 以 `Arc` 持有 `StockBarStore` / `WapStore` / `BenchmarkStore`（`Clone` 廉价）；嵌入层经 `BtParams.data = DataSource::Shared(btdata)` 复用，CLI 以 `bt a.yml b.yml ...` 多配置共享一次加载；依赖撮合参数的派生列（limit / 量上限 / 方向基价）不共享，每次 `inject_market` 重建 | 937MB 级行情参数扫描时重复解析是主要耗时；只共享原始数据而非预计算列，保证多次 run 间撮合参数（deal_price / 阈值）可变且口径与独立加载完全相等（embedding_api 对拍守护）；账户 / 基准逐日状态仍单次消耗（`Backtest::run` 单次性不变），正确性不变量不动 |
 
 ---
 

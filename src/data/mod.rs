@@ -11,6 +11,7 @@ pub use stock_bar::StockBarStore;
 pub use wap::WapStore;
 
 use std::path::Path;
+use std::sync::Arc;
 
 use polars::prelude::*;
 
@@ -102,11 +103,16 @@ pub(crate) fn date_strings(df: &DataFrame, name: &str) -> Result<Vec<String>> {
 }
 
 /// 数据容器：加载行情与基准，`build` 时统一校验并构建交易日历（规范"接口概要"）。
+///
+/// 内部以 `Arc` 持有三份存储（决策 D15）：`Clone` 为 Arc 计数克隆（廉价），
+/// 同一份已加载数据可复用于多次回测（参数扫描免重载）；依赖撮合参数的派生列
+/// 不随 `BTData` 共享，每次装配 `Backtest` 时按 `deal_price` 等重建。
+#[derive(Clone)]
 pub struct BTData {
-    pub(crate) stock_bar: Option<StockBarStore>,
-    pub(crate) benchmark: Option<BenchmarkStore>,
+    pub(crate) stock_bar: Option<Arc<StockBarStore>>,
+    pub(crate) benchmark: Option<Arc<BenchmarkStore>>,
     /// 时段 VWAP/TWAP 数据（`deal_price = vwapN / twapN` 时必需，装配期校验）
-    pub(crate) wap: Option<WapStore>,
+    pub(crate) wap: Option<Arc<WapStore>>,
 }
 
 impl BTData {
@@ -120,20 +126,20 @@ impl BTData {
 
     /// 加载股票日行情（结构校验随加载完成）。
     pub fn load_stock_bar(mut self, path: &str) -> Result<Self> {
-        self.stock_bar = Some(StockBarStore::load(Path::new(path))?);
+        self.stock_bar = Some(Arc::new(StockBarStore::load(Path::new(path))?));
         Ok(self)
     }
 
     /// 加载基准收益（一个文件可含多个指数，全部加载）。
     pub fn load_benchmark(mut self, path: &str) -> Result<Self> {
-        self.benchmark = Some(BenchmarkStore::load(Path::new(path))?);
+        self.benchmark = Some(Arc::new(BenchmarkStore::load(Path::new(path))?));
         Ok(self)
     }
 
     /// 加载 wap 时段数据（CSV 或 parquet）。`window` 为时段号 1..=11，须与
     /// `deal_price` 的时段一致（`Backtest::new` 装配期校验，不一致报错）。
     pub fn load_wap(mut self, path: &str, window: u8) -> Result<Self> {
-        self.wap = Some(WapStore::load(Path::new(path), window)?);
+        self.wap = Some(Arc::new(WapStore::load(Path::new(path), window)?));
         Ok(self)
     }
 
@@ -152,5 +158,16 @@ impl BTData {
 impl Default for BTData {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// 不展开存储内容（数百 MB 级），只标注各数据是否已加载。
+impl std::fmt::Debug for BTData {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BTData")
+            .field("stock_bar", &self.stock_bar.is_some())
+            .field("benchmark", &self.benchmark.is_some())
+            .field("wap", &self.wap.as_ref().map(|w| w.window))
+            .finish()
     }
 }

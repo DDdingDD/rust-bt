@@ -6,8 +6,8 @@ use std::collections::BTreeMap;
 
 use chrono::NaiveDate;
 use rust_bt::{
-    run, signal_from_pairs, BtParams, Decision, ExchangeParams, ExportNames, Order, Result,
-    Strategy, StrategyContext, StrategySpec,
+    run, signal_from_pairs, BTData, BtParams, DataSource, Decision, ExchangeParams, ExportNames,
+    Order, Result, Strategy, StrategyContext, StrategySpec,
 };
 
 /// 全仓轮动单只最高分股票（doc/api.md §8 的自定义策略示例）。
@@ -79,15 +79,21 @@ fn main() -> anyhow::Result<()> {
     }
     let signal = signal_from_pairs(days)?;
 
-    // 2. 参数 + 自定义策略注入
-    let params = BtParams {
-        stock_bar: "tmp_data/stock_bar.csv".into(),
-        benchmark: "tmp_data/benchmark.csv".into(),
-        wap: None, // wap 时段数据：仅当 deal_price = vwapN/twapN 时提供
-        start_date: "2026-01-01".into(),
+    // 2. 数据加载一次，多次回测共享（参数扫描免重载，决策 D15）；
+    //    只需单次回测时也可用 DataSource::Paths 由 run 内部自行加载
+    let data = BTData::new()
+        .load_stock_bar("tmp_data/stock_bar.csv")? // 股票日行情（交易日历来源；CSV 或 parquet）
+        .load_benchmark("tmp_data/benchmark.csv")? // 基准收益（报告必需）
+        // .load_wap("tmp_data/wap.parquet", 11)?  // deal_price = vwapN/twapN 时按对应时段加载
+        .build()?;
+
+    // 参数构造闭包：data 共享克隆（Arc，廉价），其余参数按需变化
+    let params = |strategy: StrategySpec| BtParams {
+        data: DataSource::Shared(data.clone()),
+        start_date: "2026-01-01".into(), // 区间 [start, end)，按交易日历自动对齐
         end_date: "2026-06-01".into(),
         initial_cash: 10_000_000.0,
-        strategy: StrategySpec::Custom(Box::new(Top1Rotation)),
+        strategy,
         exchange: ExchangeParams::default(),
         benchmark_name: rust_bt::BenchmarkName::Zz1000,
         excess_method: rust_bt::ExcessMethod::Arithmetic,
@@ -95,7 +101,10 @@ fn main() -> anyhow::Result<()> {
     };
 
     // 3. 一次调用 + 内存消费（summary 为关键指标简报；逐日序列见 doc/api.md §6）
-    let output = run(params, &signal)?;
+    let output = run(
+        params(StrategySpec::Custom(Box::new(Top1Rotation))),
+        &signal,
+    )?;
     println!("回测耗时: {:.2?}", output.result.elapsed());
     println!("{}", output.report.summary());
     // 序列自定义指标示例：卡玛比率（年化收益 / 最大回撤）
@@ -108,6 +117,12 @@ fn main() -> anyhow::Result<()> {
     std::fs::create_dir_all("output")?;
     output.export_all("output", &ExportNames::default())?;
     println!("产物已写入 output/");
+
+    // 5. 同一份数据继续做参数扫描（数据不重载，仅主循环耗时）
+    for top_n in [50, 100] {
+        let out = run(params(StrategySpec::topk_dropout(top_n, top_n)), &signal)?;
+        println!("top_n={top_n:>3}  sharpe={:.4}", out.report.derived.sharpe);
+    }
 
     Ok(())
 }

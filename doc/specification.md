@@ -80,7 +80,7 @@ fn main() -> anyhow::Result<()> {
 bt config.yml          # 或 cargo run --release --bin bt -- config.yml
 ```
 
-- 参数仅一个位置参数：配置文件路径；缺省打印用法并以退出码 2 退出。
+- 参数为一个或多个位置参数：配置文件路径；缺省打印用法并以退出码 2 退出。传入多份配置时各配置的 `data.*` 路径须一致（wap 模式配置还须同一时段），数据只加载一次、逐配置回测并各自导出（参数扫描免重载）。
 - 完整字段与默认值见仓库根目录 `config.example.yml`（带注释）。**必填**仅信号路径（`signal`）、行情数据路径（`data.stock_bar` / `data.benchmark`）与回测区间（`period.start_date` / `period.end_date`）；`data.wap` 在 `exchange.deal_price` 为 `vwapN` / `twapN`（N = 1..=11）时必填。其余字段省略时取默认值（即上文示例代码中的取值：1000 万资金、top_n=drop_n=100、open 成交、万 1.5/万 6.5 费率等）。
 - `exchange.volume_threshold` / `exchange.limit_threshold` 写 `null` 表示不限制。
 - 报错：必填字段缺失时报错并指明字段名；`strategy.name` 接受 `topk_dropout` / `topk`，其他值报错。
@@ -92,13 +92,15 @@ bt config.yml          # 或 cargo run --release --bin bt -- config.yml
 参数全部类型化--`DealPrice` / `BenchmarkName` / `ExcessMethod` 为枚举，编译期杜绝拼写错误）：
 
 ```rust
-use rust_bt::{run, signal_from_pairs, BtParams, ExchangeParams, StrategySpec};
+use rust_bt::{run, signal_from_pairs, BtParams, DataPaths, DataSource, ExchangeParams, StrategySpec};
 
 // 1. 参数（exchange 取默认值，与 CLI 默认一致）
 let params = BtParams {
-    stock_bar: "stock_bar.csv".into(),
-    benchmark: "benchmark.csv".into(),
-    wap: None, // wap 时段数据：deal_price = vwapN/twapN 时必填，如 Some("wap.parquet".into())
+    data: DataSource::Paths(DataPaths {
+        stock_bar: "stock_bar.csv".into(),
+        benchmark: "benchmark.csv".into(),
+        wap: None, // wap 时段数据：deal_price = vwapN/twapN 时必填，如 Some("wap.parquet".into())
+    }),
     start_date: "2026-01-01".into(),
     end_date: "2026-06-01".into(),
     initial_cash: 10_000_000.0,
@@ -128,7 +130,7 @@ output.export_all("output/", &rust_bt::ExportNames::default())?;
 - 自定义策略：`StrategySpec::Custom(Box::new(MyStrategy::new(...)))` 注入（实现 `Strategy` trait）。
 - 信号从文件加载的等价快捷方式：`run_from_signal_file(params, "pred.csv")`。
 - 与组件 Facade 共用同一撮合与估值路径，口径一致；需要进度条之外的细粒度编排时直接用组件层。
-- `run` 每次调用重新加载数据文件；参数扫描等需复用数据的场景用组件层 Facade 自行装配。
+- `BtParams.data = DataSource::Paths(..)` 时每次调用重新加载数据文件；`DataSource::Shared(btdata)` 复用已加载的 `BTData`（内部 Arc，`clone` 廉价），参数扫描等多次回测场景数据只加载一次；共享口径见 doc/api.md §4.4（依赖撮合参数的派生列每次 run 重建，撮合参数可变）。
 
 ---
 

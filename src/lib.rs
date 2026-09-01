@@ -21,7 +21,7 @@ pub mod strategy;
 pub mod types;
 
 pub use account::{Account, DailyRecord, HistPositionRow};
-pub use api::{run, run_from_signal_file, signal_from_pairs, BtOutput, BtParams, ExchangeParams, ExportNames, StrategySpec};
+pub use api::{run, run_from_signal_file, signal_from_pairs, BtOutput, BtParams, DataPaths, DataSource, ExchangeParams, ExportNames, StrategySpec};
 pub use backtest::Backtest;
 pub use config::BtConfig;
 pub use data::BTData;

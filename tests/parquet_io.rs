@@ -12,7 +12,7 @@ use std::path::Path;
 use common::*;
 use polars::prelude::*;
 use rust_bt::load_signal;
-use rust_bt::{api, data::StockBarStore, BtParams, DealPrice, ExchangeParams, StrategySpec};
+use rust_bt::{api, data::StockBarStore, BtParams, DataPaths, DataSource, DealPrice, ExchangeParams, StrategySpec};
 use tempfile::TempDir;
 
 const D: [&str; 5] = [
@@ -67,9 +67,11 @@ fn csv_to_parquet(src: &Path, dst: &Path) {
 /// 嵌入 API 参数（对齐 common::Params 默认：零成本零滑点，top_n=2，drop_n=1）。
 fn api_params(dir: &TempDir, stock_bar: &str, benchmark: &str) -> BtParams {
     BtParams {
-        stock_bar: dir.path().join(stock_bar).to_str().unwrap().into(),
-        benchmark: dir.path().join(benchmark).to_str().unwrap().into(),
-        wap: None,
+        data: DataSource::Paths(DataPaths {
+            stock_bar: dir.path().join(stock_bar).to_str().unwrap().into(),
+            benchmark: dir.path().join(benchmark).to_str().unwrap().into(),
+            wap: None,
+        }),
         start_date: "2026-01-05".into(),
         end_date: "2026-01-10".into(),
         initial_cash: 100_000.0,

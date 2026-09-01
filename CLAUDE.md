@@ -10,7 +10,7 @@ Rust 股票回测系统（A 股日频，暂仅上交所/深交所）。**行为�
 
 ```bash
 cargo build --release                               # 构建
-cargo run --release --bin bt -- config.example.yml   # CLI：YAML 配置驱动回测（参数格式见 config.example.yml）
+cargo run --release --bin bt -- config.example.yml   # CLI：YAML 配置驱动回测（参数格式见 config.example.yml）；支持多配置 `bt a.yml b.yml ...`（data 路径须一致，数据只加载一次，决策 D15）
 cargo run --release --example run_backtest          # 端到端示例（数据读 tmp_data/，输出写 output/，已 gitignore）
 cargo test --lib                                    # 单元测试（rules/types/position/calendar）
 cargo test --test acceptance_basic                  # 跑单个验收测试文件
@@ -24,7 +24,7 @@ cargo test                                          # 全量（含 debug 冒烟�
 
 **权威设计在文档里**：`doc/architecture.md` §4 定义了全部核心类型签名，§5 记录了 14 条关键决策（D1-D14）及其理由。改动撮合、复权、信息边界、WAP 时段价相关代码前必读。
 
-**双层公开 API（决策 D13）**：嵌入外部 Rust 代码用 `api::run`（`BtParams` 类型化参数 -> `BtOutput` 内存结果，可选 `export_all` 导出）；CLI 与示例共用该路径（`BtConfig::to_params`），勿再手写装配。组件 Facade（`BTData`/`Account`/`Exchange`/`Backtest`）供细粒度编排，两层必须共用同一撮合与估值路径（`tests/embedding_api.rs` 对拍守护）。
+**双层公开 API（决策 D13）**：嵌入外部 Rust 代码用 `api::run`（`BtParams` 类型化参数 -> `BtOutput` 内存结果，可选 `export_all` 导出）；CLI 与示例共用该路径（`BtConfig::to_params`），勿再手写装配。组件 Facade（`BTData`/`Account`/`Exchange`/`Backtest`）供细粒度编排，两层必须共用同一撮合与估值路径（`tests/embedding_api.rs` 对拍守护）。**多次回测共享数据（决策 D15）**：`BTData` 内部以 `Arc` 持有原始数据、`Clone` 廉价；嵌入层 `BtParams.data = DataSource::Shared(btdata.clone())` 复用，CLI 多配置自动共享；依赖撮合参数的派生列不共享、每次装配按当次参数重建（多次 run 间 deal_price/阈值可变且口径与独立加载一致）。
 
 **主循环时序**（`backtest.rs`，正确性核心）：每个交易日按 `复权调整(adjust_factor) → 取 T−1 日信号 → gen_decision → 阶段一卖单全部撮合 → revise_buy_orders 核减 → 阶段二买单撮合 → end_of_day 估值` 执行。顺序不可调换：复权必须先于撮合（除权日卖单按送转后 volume）；核减必须先卖后买（卖不掉的继续占 top_n 坑）。
 

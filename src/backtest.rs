@@ -1,6 +1,7 @@
 //! Backtest（回测执行器，架构 §4.8）：主循环、两阶段撮合编排、延期校验、进度条与耗时。
 
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::Instant;
 
 use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
@@ -19,7 +20,7 @@ use crate::types::DayIdx;
 /// 回测执行器：按交易日历逐步推进（取信号 -> 复权调整 -> 决策 -> 两阶段撮合 -> 估值记账）。
 pub struct Backtest {
     calendar: TradingCalendar,
-    benchmark: Option<BenchmarkStore>,
+    benchmark: Option<Arc<BenchmarkStore>>,
     account: Account,
     exchange: Exchange,
     strategy: Box<dyn Strategy>,

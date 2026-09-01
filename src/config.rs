@@ -100,6 +100,54 @@ impl BtConfig {
         Ok(())
     }
 
+    /// 多配置共享数据前置校验（CLI 批量运行 `bt a.yml b.yml ...`，决策 D15）：
+    /// 所有配置的数据路径须一致（stock_bar / benchmark 全部一致；wap 在提供它的
+    /// 配置间一致），且 wap 模式配置的 deal_price 时段须一致（共享数据只含一个
+    /// wap 时段）。`configs` 为 (配置文件路径, 配置) 对，报错信息据此指出冲突来源。
+    pub fn check_shareable_data(configs: &[(&str, &BtConfig)]) -> anyhow::Result<()> {
+        let Some((first_path, first)) = configs.first() else {
+            return Ok(());
+        };
+        for (path, cfg) in &configs[1..] {
+            for (key, a, b) in [
+                ("data.stock_bar", first.stock_bar(), cfg.stock_bar()),
+                ("data.benchmark", first.benchmark_data(), cfg.benchmark_data()),
+            ] {
+                if a != b {
+                    anyhow::bail!(
+                        "多配置共享数据要求 {key} 一致：{first_path} 为 \"{a}\"，{path} 为 \"{b}\""
+                    );
+                }
+            }
+        }
+        // wap：提供 data.wap 的配置间路径一致；wap 模式配置间时段一致
+        let mut wap_src: Option<(&str, &str)> = None;
+        let mut window_src: Option<(&str, u8)> = None;
+        for (path, cfg) in configs {
+            if let Some(w) = cfg.data.wap.as_deref().filter(|s| !s.is_empty()) {
+                match wap_src {
+                    Some((p0, w0)) if w0 != w => anyhow::bail!(
+                        "多配置共享数据要求 data.wap 一致：{p0} 为 \"{w0}\"，{path} 为 \"{w}\""
+                    ),
+                    Some(_) => {}
+                    None => wap_src = Some((path, w)),
+                }
+            }
+            if let DealPrice::Wap { window, .. } = DealPrice::parse(&cfg.exchange.deal_price)
+                .map_err(|e| anyhow!("exchange.deal_price 非法: {e}"))?
+            {
+                match window_src {
+                    Some((p0, w0)) if w0 != window => anyhow::bail!(
+                        "多配置共享数据要求 wap 时段一致：{p0} 为 wap_{w0}，{path} 为 wap_{window}"
+                    ),
+                    Some(_) => {}
+                    None => window_src = Some((path, window)),
+                }
+            }
+        }
+        Ok(())
+    }
+
     // ---- 必填字段访问器（load 已校验，此处直接 unwrap） ----
 
     pub fn signal(&self) -> &str {
@@ -121,7 +169,7 @@ impl BtConfig {
     /// 转为嵌入 API 参数（CLI 组装用）。字符串枚举在此解析为类型化枚举；
     /// `load`/`validate` 已做过同等校验，错误分支实际不可达，仍带上下文透出。
     pub fn to_params(&self) -> anyhow::Result<crate::api::BtParams> {
-        use crate::api::{BtParams, ExchangeParams, StrategySpec};
+        use crate::api::{BtParams, DataPaths, DataSource, ExchangeParams, StrategySpec};
         use crate::types::{BenchmarkName, DealPrice, ExcessMethod};
 
         let strategy = match self.strategy.name.as_str() {
@@ -138,9 +186,11 @@ impl BtConfig {
             other => anyhow::bail!("未知策略: {other}"),
         };
         Ok(BtParams {
-            stock_bar: self.stock_bar().to_owned(),
-            benchmark: self.benchmark_data().to_owned(),
-            wap: self.data.wap.clone(),
+            data: DataSource::Paths(DataPaths {
+                stock_bar: self.stock_bar().to_owned(),
+                benchmark: self.benchmark_data().to_owned(),
+                wap: self.data.wap.clone(),
+            }),
             start_date: self.start_date().to_owned(),
             end_date: self.end_date().to_owned(),
             initial_cash: self.account.initial_cash,
@@ -514,5 +564,42 @@ progress: false
         );
         let err = parse(&yaml).unwrap_err().to_string();
         assert!(err.contains("data.wap"), "wap 提供但 deal_price 非时段价应报错: {err}");
+    }
+
+    #[test]
+    fn shareable_data_check() {
+        // 一致配置（含 wap 同时段）通过
+        let a = parse(MINIMAL_YAML).unwrap();
+        let b = parse(&format!("{MINIMAL_YAML}strategy:\n  top_n: 30\n")).unwrap();
+        BtConfig::check_shareable_data(&[("a.yml", &a), ("b.yml", &b)]).unwrap();
+
+        let wap_yaml = |window: u8| {
+            MINIMAL_YAML.replace(
+                "  benchmark: \"tmp_data/benchmark.csv\"",
+                &format!(
+                    "  benchmark: \"tmp_data/benchmark.csv\"\n  wap: \"w.parquet\"\nexchange:\n  deal_price: \"vwap{window}\""
+                ),
+            )
+        };
+        let w1 = parse(&wap_yaml(11)).unwrap();
+        let w2 = parse(&wap_yaml(11)).unwrap();
+        BtConfig::check_shareable_data(&[("w1.yml", &w1), ("w2.yml", &w2)]).unwrap();
+
+        // stock_bar 不一致 -> 报错并指出冲突配置
+        let c = parse(&MINIMAL_YAML.replace("stock_bar.csv", "other.csv")).unwrap();
+        let err = BtConfig::check_shareable_data(&[("a.yml", &a), ("c.yml", &c)])
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("data.stock_bar") && err.contains("c.yml"), "{err}");
+
+        // wap 时段不一致 -> 报错
+        let w3 = parse(&wap_yaml(3)).unwrap();
+        let err = BtConfig::check_shareable_data(&[("w1.yml", &w1), ("w3.yml", &w3)])
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("wap 时段") && err.contains("w3.yml"), "{err}");
+
+        // wap 与非 wap 配置混跑允许（非 wap 配置不提供 data.wap，单配置校验已保证）
+        BtConfig::check_shareable_data(&[("a.yml", &a), ("w1.yml", &w1)]).unwrap();
     }
 }

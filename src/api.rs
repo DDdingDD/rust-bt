@@ -26,17 +26,35 @@ use crate::signal::{Signal, SignalDay};
 use crate::strategy::{Strategy, TopkDropoutStrategy, TopkStrategy};
 use crate::types::{BenchmarkName, DealPrice, ExcessMethod};
 
-/// 高层回测参数。行情与基准从 CSV 路径加载（每次 `run` 重新读取），
-/// 信号经 `signal` 参数注入（文件或内存构造均可）。
-#[derive(Debug)]
-pub struct BtParams {
-    /// 股票日行情 CSV 路径（stock_bar.csv，交易日历来源）。
+/// 数据文件路径（stock_bar / benchmark 必填；wap 在 `deal_price` 为 vwapN/twapN 时必填）。
+#[derive(Debug, Clone)]
+pub struct DataPaths {
+    /// 股票日行情 CSV / parquet 路径（stock_bar，交易日历来源）。
     pub stock_bar: String,
-    /// 基准收益 CSV 路径（benchmark.csv，报告必需）。
+    /// 基准收益 CSV / parquet 路径（benchmark，报告必需）。
     pub benchmark: String,
     /// wap 时段数据路径（CSV 或 parquet，按扩展名识别）；`deal_price` 为
     /// vwapN/twapN 时必填，时段号按 deal_price 推导。
     pub wap: Option<String>,
+}
+
+/// 数据来源：每次 `run` 重新加载，或共享一份已加载数据多次复用（决策 D15）。
+#[derive(Debug, Clone)]
+pub enum DataSource {
+    /// 从路径加载：每次 `run` 重新读取并校验数据文件。
+    Paths(DataPaths),
+    /// 共享已加载的 `BTData`（内部 `Arc`，`clone` 廉价）：参数扫描等多次
+    /// 回测场景只加载一次。wap 时段号在 `load_wap` 时固定，各次 run 的
+    /// `deal_price` 时段须与之一致（装配期校验，不一致报错）。
+    Shared(BTData),
+}
+
+/// 高层回测参数。数据来源经 `data` 字段指定（路径或共享数据），
+/// 信号经 `signal` 参数注入（文件或内存构造均可）。
+#[derive(Debug)]
+pub struct BtParams {
+    /// 行情 / 基准 / wap 数据来源。
+    pub data: DataSource,
     /// 回测区间（闭开区间 [start, end)，按交易日历自动对齐）。
     pub start_date: String,
     pub end_date: String,
@@ -201,11 +219,12 @@ impl BtOutput {
     }
 }
 
-/// 运行回测：装配（账户 / 交易所 / 策略）-> 加载行情与基准 -> 主循环 -> 报告。
+/// 运行回测：装配（账户 / 交易所 / 策略）-> 数据 -> 主循环 -> 报告。
 ///
 /// 参数校验先于数据加载（数百 MB 行情读取前 fail fast）；`params` 按值传入
-/// （自定义策略 Box 被消耗）。每次调用重新加载行情 CSV，参数扫描等需要
-/// 复用数据的场景请使用组件层 Facade。
+/// （自定义策略 Box 被消耗）。`params.data` 为 [`DataSource::Paths`] 时每次调用
+/// 重新加载数据文件；为 [`DataSource::Shared`] 时复用已加载的 `BTData`（内部
+/// `Arc`，参数扫描多次调用只加载一次，派生列仍按每次撮合参数重建）。
 pub fn run(params: BtParams, signal: &Signal) -> Result<BtOutput> {
     // 1. 数值参数校验（嵌入方不经过 BtConfig，须在此拦截）
     if !params.initial_cash.is_finite() || params.initial_cash <= 0.0 {
@@ -254,30 +273,39 @@ pub fn run(params: BtParams, signal: &Signal) -> Result<BtOutput> {
         params.exchange.limit_threshold,
     )?;
 
-    // 3. wap 路径与 deal_price 匹配校验（先于数据加载 fail fast）
+    // 3. wap 与 deal_price 匹配校验（先于 Paths 数据加载 fail fast；
+    //    Shared 数据的路径存在性校验无意义，跳过——wap 窗口一致性由装配期校验拦截）
     let wap_window = match params.exchange.deal_price {
         DealPrice::Wap { window, .. } => Some(window),
         _ => None,
     };
-    if wap_window.is_some() && params.wap.is_none() {
-        return Err(BtError::InvalidParam(format!(
-            "deal_price={} 需要 wap 时段数据，请设置 BtParams.wap",
-            params.exchange.deal_price
-        )));
-    }
-    if params.wap.is_some() && wap_window.is_none() {
-        log::warn!(
-            "BtParams.wap 已提供但 deal_price={} 未使用 vwapN/twapN，忽略",
-            params.exchange.deal_price
-        );
+    if let DataSource::Paths(paths) = &params.data {
+        if wap_window.is_some() && paths.wap.is_none() {
+            return Err(BtError::InvalidParam(format!(
+                "deal_price={} 需要 wap 时段数据，请设置 DataPaths.wap",
+                params.exchange.deal_price
+            )));
+        }
+        if paths.wap.is_some() && wap_window.is_none() {
+            log::warn!(
+                "DataPaths.wap 已提供但 deal_price={} 未使用 vwapN/twapN，忽略",
+                params.exchange.deal_price
+            );
+        }
     }
 
-    // 4. 加载数据 -> 运行 -> 报告
-    let mut data = BTData::new().load_stock_bar(&params.stock_bar)?;
-    if let (Some(path), Some(window)) = (&params.wap, wap_window) {
-        data = data.load_wap(path, window)?;
-    }
-    let data = data.load_benchmark(&params.benchmark)?.build()?;
+    // 4. 数据 -> 运行 -> 报告
+    let data = match params.data {
+        DataSource::Paths(paths) => {
+            let mut data = BTData::new().load_stock_bar(&paths.stock_bar)?;
+            if let (Some(path), Some(window)) = (&paths.wap, wap_window) {
+                data = data.load_wap(path, window)?;
+            }
+            data.load_benchmark(&paths.benchmark)?.build()?
+        }
+        // build 校验 stock_bar 存在（Backtest::new 的不变量），对共享数据同样生效
+        DataSource::Shared(data) => data.build()?,
+    };
     let account = Account::new(params.initial_cash);
     let mut backtest = Backtest::new(data, account, exchange, strategy)?.with_progress(params.progress);
     let result = backtest.run(signal, &params.start_date, &params.end_date)?;
@@ -312,9 +340,11 @@ mod tests {
 
     fn params() -> BtParams {
         BtParams {
-            stock_bar: "x.csv".into(),
-            benchmark: "b.csv".into(),
-            wap: None,
+            data: DataSource::Paths(DataPaths {
+                stock_bar: "x.csv".into(),
+                benchmark: "b.csv".into(),
+                wap: None,
+            }),
             start_date: "2026-01-01".into(),
             end_date: "2026-06-01".into(),
             initial_cash: 1_000_000.0,

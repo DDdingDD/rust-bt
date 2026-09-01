@@ -1,6 +1,7 @@
 //! BTResult（回测结果，架构 §4.9）：逐日账户快照 + 持仓历史 + 成交记录的导出与报表生成。
 
 use std::ops::Range;
+use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::NaiveDate;
@@ -20,7 +21,7 @@ pub struct BTResult {
     trades: Vec<TradeRecord>,
     calendar: TradingCalendar,
     range: Range<DayIdx>,
-    benchmark: Option<BenchmarkStore>,
+    benchmark: Option<Arc<BenchmarkStore>>,
     initial_cash: f64,
     /// run() 墙钟耗时（含启动校验与结果装配，不含 BTData 加载；元数据，不进导出文件）
     elapsed: Duration,
@@ -33,7 +34,7 @@ impl BTResult {
         trades: Vec<TradeRecord>,
         calendar: TradingCalendar,
         range: Range<DayIdx>,
-        benchmark: Option<BenchmarkStore>,
+        benchmark: Option<Arc<BenchmarkStore>>,
         initial_cash: f64,
     ) -> Self {
         Self {

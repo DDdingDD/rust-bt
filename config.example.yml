@@ -2,6 +2,10 @@
 #
 # 必填：signal（信号路径）、data.*（行情数据路径）与 period.*（回测区间）。
 # 其余字段均可省略，默认值即本文件中所示（对齐 examples/run_backtest.rs）。
+#
+# 多配置批量：`bt a.yml b.yml ...` 一次进程跑多份配置（如参数扫描），
+# 各配置的 data.* 路径须一致（wap 模式配置还须同一 deal_price 时段），
+# 数据只加载一次、逐配置回测并各自导出。
 
 # 信号 CSV 路径（必填）
 signal: "tmp_data/pred.csv"

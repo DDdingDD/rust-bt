@@ -15,8 +15,11 @@ use crate::exchange::rules;
 use crate::types::{Code, DayIdx, DealPrice, StockTradable, TradableInfo, WapKind};
 
 /// 注入行情后的按日市场存储：原始行情 + 预计算列，按 (DayIdx, Code) 排序。
+///
+/// 原始行情 `bar` 为 `Arc` 共享（决策 D15）：同一份数据跨多次回测复用，
+/// 本存储内依赖撮合参数的派生列（limit / 量上限 / 方向基价）每次装配重建。
 pub struct DailyMarketStore {
-    bar: StockBarStore,
+    bar: std::sync::Arc<StockBarStore>,
     /// 策略可见价（委托定价与金额换算）：普通模式 = deal_price 列；wap 模式 = pre_close；
     /// 缺失 / NaN / ≤ 0 时为 NaN，当日该股不可交易
     deal_price: Vec<f64>,
@@ -70,7 +73,7 @@ impl DailyMarketStore {
     /// `wap` 在 `deal_price` 为 `Wap` 时必须提供且时段一致（`inject_market` 已校验）；
     /// 普通模式应传 `None`（提供则由调用方告警忽略）。
     pub fn build(
-        bar: StockBarStore,
+        bar: std::sync::Arc<StockBarStore>,
         wap: Option<&WapStore>,
         deal_price_col: DealPrice,
         volume_threshold: Option<f64>,

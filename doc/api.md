@@ -46,15 +46,17 @@ env_logger::init(); // 任意 log facade 实现均可
 ## 2. 30 秒上手
 
 ```rust
-use rust_bt::{run_from_signal_file, BtParams, ExchangeParams, StrategySpec};
+use rust_bt::{run_from_signal_file, BtParams, DataPaths, DataSource, ExchangeParams, StrategySpec};
 
 fn main() -> anyhow::Result<()> {
     env_logger::init();
 
     let params = BtParams {
-        stock_bar: "tmp_data/stock_bar.csv".into(),   // 股票日行情（交易日历来源；CSV 或 parquet）
-        benchmark: "tmp_data/benchmark.csv".into(),   // 基准收益（报告必需；CSV 或 parquet）
-        wap: None,                                    // wap 时段数据：deal_price = vwapN/twapN 时必填
+        data: DataSource::Paths(DataPaths {
+            stock_bar: "tmp_data/stock_bar.csv".into(),   // 股票日行情（交易日历来源；CSV 或 parquet）
+            benchmark: "tmp_data/benchmark.csv".into(),   // 基准收益（报告必需；CSV 或 parquet）
+            wap: None,                                    // wap 时段数据：deal_price = vwapN/twapN 时必填
+        }),
         start_date: "2026-01-01".into(),              // 区间 [start, end)，按交易日历自动对齐
         end_date: "2026-06-01".into(),
         initial_cash: 10_000_000.0,                   // 期初资金
@@ -90,6 +92,8 @@ fn main() -> anyhow::Result<()> {
 | 类型 | 说明 |
 | --- | --- |
 | `BtParams` | 回测参数（§4） |
+| `DataSource` | 数据来源：`Paths(DataPaths)` 每次 run 重新加载 / `Shared(BTData)` 共享已加载数据（§4.4） |
+| `DataPaths` | 数据文件路径：stock_bar / benchmark / wap（§4.1） |
 | `StrategySpec` | 策略规格：`TopkDropout{..}` / `Topk{..}` 参数化 / `Custom(Box<dyn Strategy>)` 注入 |
 | `ExchangeParams` | 撮合与成本参数（实现 `Default`，默认值对齐 CLI） |
 | `BtOutput` | 回测输出：`result: BTResult` + `report: Report`（§6） |
@@ -107,9 +111,7 @@ fn main() -> anyhow::Result<()> {
 
 | 字段 | 类型 | 约束 / 说明 |
 | --- | --- | --- |
-| `stock_bar` | `String` | 股票日行情路径（CSV 或 parquet，按扩展名识别）；交易日历由其中全部 `datetime` 去重排序构成 |
-| `benchmark` | `String` | 基准收益路径（CSV 或 parquet，同上）；一个文件可含多个指数，报告按 `benchmark_name` 选定 |
-| `wap` | `Option<String>` | wap 时段数据路径（CSV 或 parquet）；`exchange.deal_price` 为 `vwapN`/`twapN`（N=1..=11，时段表见规范"数据文件格式--wap 数据"）时必填 |
+| `data` | `DataSource` | 数据来源：`Paths(DataPaths)` 每次 run 从文件重新加载；`Shared(BTData)` 复用已加载数据（多次 run 只加载一次，见 §4.4） |
 | `start_date` / `end_date` | `String` | `YYYY-MM-DD`；闭开区间 `[start, end)`，按交易日历自动对齐 |
 | `initial_cash` | `f64` | 期初资金，须为正的有限值 |
 | `strategy` | `StrategySpec` | 见 §4.3 与 §8 |
@@ -155,6 +157,55 @@ pub enum StrategySpec {
   的持仓才卖出，仍在 `top_n` 内的持仓原样保留，不每日轮换。
 - `Custom(...)`：注入自定义策略（实现 `Strategy` trait，见 §8）。`run` 会**消耗**
   该 Box（装配进 `Backtest`）；跨多次回测复用同一策略实例请每次重新构造。
+
+### 4.4 DataSource：多次 run 共享数据
+
+`BtParams.data` 决定数据从哪来：
+
+```rust
+pub enum DataSource {
+    Paths(DataPaths),   // 每次 run 重新加载数据文件
+    Shared(BTData),     // 复用已加载数据（内部 Arc，clone 廉价）
+}
+```
+
+参数扫描等需要多次回测的场景，数据只加载一次：
+
+```rust
+let data = rust_bt::BTData::new()
+    .load_stock_bar("tmp_data/stock_bar.csv")?
+    .load_benchmark("tmp_data/benchmark.csv")?
+    // .load_wap("tmp_data/wap.parquet", 11)?  // deal_price = vwapN/twapN 时按对应时段加载
+    .build()?;
+
+// 参数构造闭包：data 共享克隆（Arc，廉价），其余参数按需变化
+let params = |strategy: StrategySpec| BtParams {
+    data: DataSource::Shared(data.clone()),
+    start_date: "2026-01-01".into(),
+    end_date: "2026-06-01".into(),
+    initial_cash: 10_000_000.0,
+    strategy,
+    exchange: ExchangeParams::default(),
+    benchmark_name: rust_bt::BenchmarkName::Zz1000,
+    excess_method: rust_bt::ExcessMethod::Arithmetic,
+    progress: false,
+};
+
+for top_n in [20, 50, 100] {
+    let output = run(params(StrategySpec::topk_dropout(top_n, top_n)), &signal)?;
+    println!("top_n={top_n}  sharpe={:.4}", output.report.derived.sharpe);
+}
+```
+
+口径说明（架构 D15）：
+
+- 共享的只有**原始数据**（stock_bar / benchmark / wap）；依赖撮合参数的派生列
+  （涨跌停标记、量上限、方向基价）每次 `run` 按当次 `exchange` 参数重建，因此
+  多次 run 之间 `deal_price` / 费率 / 阈值均可变，结果与各自独立加载完全相等
+  （`tests/embedding_api.rs` 对拍守护）。
+- `Shared` 数据的 wap 时段号在 `load_wap` 时固定；各次 run 的 `deal_price` 时段
+  须与之一致（装配期校验，不一致报错）。扫多个 wap 时段请按时段各加载一份。
+- 每次 `run` 内部仍新建 `Backtest` 与全新账户——持仓 / 现金等状态不跨 run。
 
 ## 5. 信号：文件加载与内存构造
 
@@ -425,7 +476,7 @@ StockTradable {
 ```rust
 use std::collections::BTreeMap;
 use chrono::NaiveDate;
-use rust_bt::{run, signal_from_pairs, BtParams, ExchangeParams, StrategySpec};
+use rust_bt::{run, signal_from_pairs, BtParams, DataPaths, DataSource, ExchangeParams, StrategySpec};
 
 fn research_loop(stock: &str, bench: &str) -> rust_bt::Result<f64> {
     // 1. 信号来自你的因子模型（示例：任意生成器），按日收集 (instrument, score)
@@ -439,8 +490,11 @@ fn research_loop(stock: &str, bench: &str) -> rust_bt::Result<f64> {
 
     // 3. 单次回测取信息比率
     let params = BtParams {
-        stock_bar: stock.into(),
-        benchmark: bench.into(),
+        data: DataSource::Paths(DataPaths {
+            stock_bar: stock.into(),
+            benchmark: bench.into(),
+            wap: None,
+        }),
         start_date: "2026-01-01".into(),
         end_date: "2026-06-01".into(),
         initial_cash: 10_000_000.0,
@@ -455,17 +509,22 @@ fn research_loop(stock: &str, bench: &str) -> rust_bt::Result<f64> {
 }
 ```
 
-### 示例 2：参数扫描 -- top_n 网格
+### 示例 2：参数扫描 -- top_n 网格（数据只加载一次）
 
 ```rust
-use rust_bt::{run, signal_from_pairs, BtParams, ExchangeParams, StrategySpec};
+use rust_bt::{run, signal_from_pairs, BTData, BtParams, DataSource, ExchangeParams, StrategySpec};
 
 fn sweep(signal: &rust_bt::Signal, paths_stock: &str, paths_bench: &str) -> rust_bt::Result<()> {
+    // 数据加载一次，网格内全部 run 共享（Arc 克隆廉价；撮合参数也可随 run 变化）
+    let data = BTData::new()
+        .load_stock_bar(paths_stock)?
+        .load_benchmark(paths_bench)?
+        .build()?;
+
     let mut results = Vec::new();
     for top_n in [20, 50, 100, 200] {
         let params = BtParams {
-            stock_bar: paths_stock.into(),
-            benchmark: paths_bench.into(),
+            data: DataSource::Shared(data.clone()),
             start_date: "2026-01-01".into(),
             end_date: "2026-06-01".into(),
             initial_cash: 10_000_000.0,
@@ -483,9 +542,8 @@ fn sweep(signal: &rust_bt::Signal, paths_stock: &str, paths_bench: &str) -> rust
 }
 ```
 
-> 每次调用 `run` 重新加载行情数据文件（当前无跨 `run` 的数据复用；架构 D13 记录了
-> 后续 `Arc` 共享行情的演进方向）。数据量大、组合数多时请把加载耗时计入预算；
-> parquet 体积与解析开销通常显著低于同内容 CSV，大数据集建议优先使用。
+> 共享语义与口径保证见 §4.4。数据量大、加载慢时 parquet 体积与解析开销通常
+> 显著低于同内容 CSV，大数据集建议优先使用。
 
 ### 示例 3：基于序列计算自定义指标（卡玛比率 + 平均换手）
 
@@ -543,7 +601,8 @@ for d in result.daily() {
 - **费用口径**：费用直接扣现金、不摊入 `cost_price`；不含成本指标由
   `V + 累计费用` 在 Report 层派生（近似，架构 D5）。现金允许为负（卖出费用超
   成交金额情形）。
-- **单次性**：`api::run` 每次内部新建 `Backtest`，无单次限制；组件层
+- **单次性**：`api::run` 每次内部新建 `Backtest` 与全新账户（持仓 / 现金不跨 run），
+  无单次限制；`DataSource::Shared` 共享的只有原始数据（§4.4）。组件层
   `Backtest::run` 只能调用一次。
 - **日志**：告警走 `log` facade，调用方负责初始化 logger（§1）。
 

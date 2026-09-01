@@ -116,18 +116,20 @@ impl Exchange {
 
     /// 注入行情（由 `Backtest::new` 调用）：按 deal_price 预计算 limit 列。
     ///
-    /// 装配期校验 wap 数据与 deal_price 匹配：wap 模式（vwapN/twapN）必须提供 wap
-    /// 数据且时段一致；普通模式提供了 wap 数据则告警忽略。
+    /// 行情以 `Arc` 传入（决策 D15）：原始数据可跨多次回测共享，本方法每次
+    /// 装配按当前撮合参数重建派生列。装配期校验 wap 数据与 deal_price 匹配：
+    /// wap 模式（vwapN/twapN）必须提供 wap 数据且时段一致；普通模式提供了
+    /// wap 数据则告警忽略。
     pub(crate) fn inject_market(
         &mut self,
-        bar: StockBarStore,
-        wap: Option<WapStore>,
+        bar: std::sync::Arc<StockBarStore>,
+        wap: Option<std::sync::Arc<WapStore>>,
     ) -> Result<()> {
         match self.config.deal_price {
             DealPrice::Wap { window, .. } => {
                 let wap = wap.ok_or_else(|| {
                     BtError::InvalidParam(format!(
-                        "deal_price={} 需要 wap 时段数据，请经 BTData::load_wap / BtParams.wap 提供",
+                        "deal_price={} 需要 wap 时段数据，请经 BTData::load_wap / DataPaths.wap 提供",
                         self.config.deal_price
                     ))
                 })?;

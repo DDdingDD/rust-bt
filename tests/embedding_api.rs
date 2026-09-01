@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 
 use chrono::NaiveDate;
 use common::*;
-use rust_bt::{api, BtParams, DealPrice, ExportNames, ExchangeParams, StrategySpec, TopkDropoutStrategy, TopkStrategy, WapKind};
+use rust_bt::{api, BtParams, DataPaths, DataSource, DealPrice, ExportNames, ExchangeParams, StrategySpec, TopkDropoutStrategy, TopkStrategy, WapKind};
 use tempfile::TempDir;
 
 const D: [&str; 5] = [
@@ -57,9 +57,11 @@ fn setup(with_bench: bool) -> (TempDir, Params) {
 /// 嵌入 API 参数（对齐 common::Params 默认：零成本零滑点，top_n=2，drop_n=1）。
 fn api_params(dir: &TempDir, strategy: StrategySpec) -> BtParams {
     BtParams {
-        stock_bar: dir.path().join("stock_bar.csv").to_str().unwrap().into(),
-        benchmark: dir.path().join("benchmark.csv").to_str().unwrap().into(),
-        wap: None,
+        data: DataSource::Paths(DataPaths {
+            stock_bar: dir.path().join("stock_bar.csv").to_str().unwrap().into(),
+            benchmark: dir.path().join("benchmark.csv").to_str().unwrap().into(),
+            wap: None,
+        }),
         start_date: "2026-01-05".into(),
         end_date: "2026-01-10".into(),
         initial_cash: 100_000.0,
@@ -220,7 +222,11 @@ fn wap_run_matches_component_layer() {
         &params);
 
     let mut api_p = api_params(&dir, StrategySpec::topk_dropout(2, 1));
-    api_p.wap = Some(dir.path().join("wap.csv").to_str().unwrap().into());
+    api_p.data = DataSource::Paths(DataPaths {
+        stock_bar: dir.path().join("stock_bar.csv").to_str().unwrap().into(),
+        benchmark: dir.path().join("benchmark.csv").to_str().unwrap().into(),
+        wap: Some(dir.path().join("wap.csv").to_str().unwrap().into()),
+    });
     api_p.exchange.deal_price = DealPrice::Wap {
         kind: WapKind::Vwap,
         window: 11,
@@ -229,6 +235,59 @@ fn wap_run_matches_component_layer() {
 
     assert_daily_same(&output.result, &expected);
     assert_trades_same(&output.result, &expected);
+}
+
+#[test]
+fn shared_data_multi_run_matches_independent_runs() {
+    // 决策 D15：DataSource::Shared 复用同一份 BTData 跨多次 run（策略 / 撮合参数
+    // 均可变），结果须与每次独立加载（Paths）完全相等——共享不改变口径。
+    let (dir, _) = setup(true);
+    let data = rust_bt::BTData::new()
+        .load_stock_bar(dir.path().join("stock_bar.csv").to_str().unwrap())
+        .unwrap()
+        .load_benchmark(dir.path().join("benchmark.csv").to_str().unwrap())
+        .unwrap()
+        .build()
+        .unwrap();
+    let with_shared = |mut p: BtParams| {
+        p.data = DataSource::Shared(data.clone());
+        p
+    };
+
+    // 第一次 run：默认撮合参数
+    let a_shared = api::run(
+        with_shared(api_params(&dir, StrategySpec::topk_dropout(2, 1))),
+        &in_memory_signal(),
+    )
+    .unwrap();
+    let a_paths = api::run(
+        api_params(&dir, StrategySpec::topk_dropout(2, 1)),
+        &in_memory_signal(),
+    )
+    .unwrap();
+    assert_daily_same(&a_shared.result, &a_paths.result);
+    assert_trades_same(&a_shared.result, &a_paths.result);
+
+    // 第二次 run：换策略且换撮合参数（deal_price = close + 非零卖出费率），
+    // 同一份共享数据仍正确（派生列按每次撮合参数重建）
+    let mut b_shared = with_shared(api_params(&dir, StrategySpec::topk(2)));
+    b_shared.exchange.deal_price = DealPrice::Close;
+    b_shared.exchange.close_cost = 0.001;
+    let b_shared = api::run(b_shared, &in_memory_signal()).unwrap();
+    let mut b_paths = api_params(&dir, StrategySpec::topk(2));
+    b_paths.exchange.deal_price = DealPrice::Close;
+    b_paths.exchange.close_cost = 0.001;
+    let b_paths = api::run(b_paths, &in_memory_signal()).unwrap();
+    assert_daily_same(&b_shared.result, &b_paths.result);
+    assert_trades_same(&b_shared.result, &b_paths.result);
+
+    // 两次 run 撮合参数不同，结果应确实不同（守护对拍不是恒真：
+    // 本场景价格恒 10 且 a 零费用，b 有卖出费用，期末账户必严格更低）
+    assert!(
+        b_shared.result.daily().last().unwrap().account
+            < a_shared.result.daily().last().unwrap().account,
+        "b 有卖出费用，期末账户应低于零费用的 a"
+    );
 }
 
 #[test]
