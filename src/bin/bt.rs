@@ -14,7 +14,13 @@ fn main() -> anyhow::Result<()> {
     let config_paths: Vec<String> = std::env::args().skip(1).collect();
     if config_paths.is_empty() {
         eprintln!("用法: bt <config.yml> [更多配置.yml ...]");
+        eprintln!("      bt --version | -V        显示版本号");
         std::process::exit(2);
+    }
+    // 版本号取 Cargo.toml（发布 tag 与之一致，见记忆 release-versioning）
+    if config_paths[0] == "--version" || config_paths[0] == "-V" {
+        println!("bt {}", env!("CARGO_PKG_VERSION"));
+        return Ok(());
     }
 
     env_logger::init();
