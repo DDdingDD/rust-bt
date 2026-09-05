@@ -435,6 +435,8 @@ Report 另提供全部绘图序列的只读访问器（`dates` / `metrics` / `cu
 pub struct DataPaths { pub stock_bar: String, pub benchmark: String, pub wap: Option<String> }
 pub enum DataSource {                                  // wap 时段数据路径：deal_price = vwapN/twapN 时必填
     Paths(DataPaths),                                  // 每次 run 重新加载
+    Dir(String),                                       // 目录自动发现：主干名 stock_bar/benchmark/wap，
+                                                       // 扩展名 parquet > pq > csv；wap 按需发现，解析为 Paths 后同路径
     Shared(BTData),                                    // 共享已加载数据（内部 Arc，clone 廉价），参数扫描免重载（D15）
 }
 pub struct BtParams {

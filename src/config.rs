@@ -28,12 +28,52 @@ pub struct BtConfig {
 impl BtConfig {
     /// 从 YAML 文件加载配置，并校验必填字段。
     pub fn load(path: &str) -> anyhow::Result<Self> {
-        let text = std::fs::read_to_string(path)
-            .with_context(|| format!("读取配置文件失败: {path}"))?;
-        let cfg: BtConfig = serde_yaml::from_str(&text)
-            .with_context(|| format!("解析 YAML 配置失败: {path}"))?;
+        let text =
+            std::fs::read_to_string(path).with_context(|| format!("读取配置文件失败: {path}"))?;
+        let mut cfg: BtConfig =
+            serde_yaml::from_str(&text).with_context(|| format!("解析 YAML 配置失败: {path}"))?;
+        // 目录发现先于校验：data.dir 解析回填具体文件路径后，
+        // 下游（check_shareable_data / to_params / CLI）看到的与显式配置无异
+        cfg.resolve_data_dir()?;
         cfg.validate()?;
         Ok(cfg)
+    }
+
+    /// `data.dir` 目录发现：显式路径优先，dir 只补缺失的 stock_bar / benchmark；
+    /// wap 按需发现——仅 `deal_price` 为 vwapN/twapN 时查找（目录里的 wap 文件
+    /// 对非时段价回测无影响，也不触发 validate 的 wap/deal_price 匹配报错）。
+    fn resolve_data_dir(&mut self) -> anyhow::Result<()> {
+        let Some(dir) = self.data.dir.as_deref().filter(|s| !s.is_empty()) else {
+            return Ok(());
+        };
+        let dir = dir.to_owned();
+        if !std::path::Path::new(&dir).is_dir() {
+            return Err(anyhow!("data.dir 不存在或不是目录: {dir}"));
+        }
+        let fill = |field: &str, stem: &str, slot: &mut Option<String>| -> anyhow::Result<()> {
+            if slot.as_deref().is_some_and(|s| !s.is_empty()) {
+                return Ok(()); // 显式路径优先
+            }
+            match crate::data::find_data_file(&dir, stem) {
+                Some(p) => {
+                    *slot = Some(p);
+                    Ok(())
+                }
+                None => Err(anyhow!(
+                    "data.dir 目录 {dir} 中未找到 {stem} 数据文件（{stem}.parquet / {stem}.pq / {stem}.csv），请显式配置 {field}"
+                )),
+            }
+        };
+        fill("data.stock_bar", "stock_bar", &mut self.data.stock_bar)?;
+        fill("data.benchmark", "benchmark", &mut self.data.benchmark)?;
+        let need_wap = matches!(
+            DealPrice::parse(&self.exchange.deal_price),
+            Ok(DealPrice::Wap { .. })
+        );
+        if need_wap {
+            fill("data.wap", "wap", &mut self.data.wap)?;
+        }
+        Ok(())
     }
 
     fn validate(&self) -> anyhow::Result<()> {
@@ -45,7 +85,12 @@ impl BtConfig {
             ("period.end_date", &self.period.end_date),
         ] {
             if val.as_deref().is_none_or(str::is_empty) {
-                return Err(anyhow!("配置缺少必填字段: {key}"));
+                let hint = if key.starts_with("data.") {
+                    "（或配置 data.dir 目录自动发现）"
+                } else {
+                    ""
+                };
+                return Err(anyhow!("配置缺少必填字段: {key}{hint}"));
             }
         }
         // 数值与枚举参数在加载期统一校验：避免加载数百 MB 行情后（甚至跑完整个
@@ -111,7 +156,11 @@ impl BtConfig {
         for (path, cfg) in &configs[1..] {
             for (key, a, b) in [
                 ("data.stock_bar", first.stock_bar(), cfg.stock_bar()),
-                ("data.benchmark", first.benchmark_data(), cfg.benchmark_data()),
+                (
+                    "data.benchmark",
+                    first.benchmark_data(),
+                    cfg.benchmark_data(),
+                ),
             ] {
                 if a != b {
                     anyhow::bail!(
@@ -148,8 +197,10 @@ impl BtConfig {
 
         // 输出路径：多配置时各配置的四类产物不能写入同一文件，防止静默覆盖
         if configs.len() > 1 {
-            let mut seen: std::collections::HashMap<(String, String, String, String, String), &str> =
-                std::collections::HashMap::new();
+            let mut seen: std::collections::HashMap<
+                (String, String, String, String, String),
+                &str,
+            > = std::collections::HashMap::new();
             for (path, cfg) in configs {
                 let key = (
                     cfg.output.dir.clone(),
@@ -228,8 +279,9 @@ impl BtConfig {
                 volume_threshold: self.exchange.volume_threshold,
                 limit_threshold: self.exchange.limit_threshold,
             },
-            benchmark_name: BenchmarkName::from_name(&self.report.benchmark)
-                .ok_or_else(|| anyhow!("report.benchmark 未知基准名称: {}", self.report.benchmark))?,
+            benchmark_name: BenchmarkName::from_name(&self.report.benchmark).ok_or_else(|| {
+                anyhow!("report.benchmark 未知基准名称: {}", self.report.benchmark)
+            })?,
             excess_method: ExcessMethod::parse(&self.report.excess_method)
                 .map_err(|e| anyhow!("report.excess_method 非法: {e}"))?,
             progress: self.progress,
@@ -255,12 +307,18 @@ impl Default for BtConfig {
 
 /// 行情数据文件路径（stock_bar 与 benchmark 必填；wap 在 deal_price 为
 /// vwapN/twapN 时必填，见 `ExchangeConfig::deal_price`）。
+///
+/// 也可改为提供 `dir` 目录自动发现：按文件名主干 stock_bar / benchmark /
+/// wap 匹配，扩展名优先级 parquet > pq > csv；显式路径优先于目录发现
+/// （可只显式覆盖其中一项），wap 仅在 deal_price 为时段价时查找。
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
 pub struct DataConfig {
-    /// 股票日行情 CSV（stock_bar.csv）。
+    /// 数据目录：自动发现 stock_bar / benchmark（按需 wap）数据文件。
+    pub dir: Option<String>,
+    /// 股票日行情 CSV / parquet（stock_bar）。
     pub stock_bar: Option<String>,
-    /// 基准收益 CSV（benchmark.csv）。
+    /// 基准收益 CSV / parquet（benchmark）。
     pub benchmark: Option<String>,
     /// wap 时段数据（wap.csv / wap.parquet，deal_price 为 vwapN/twapN 时必填）。
     pub wap: Option<String>,
@@ -519,7 +577,8 @@ progress: false
 
     #[test]
     fn topk_strategy_maps_to_spec() {
-        let yaml = format!("{MINIMAL_YAML}strategy:\n  name: \"topk\"\n  top_n: 30\n  forbid_st: true\n");
+        let yaml =
+            format!("{MINIMAL_YAML}strategy:\n  name: \"topk\"\n  top_n: 30\n  forbid_st: true\n");
         let cfg = parse(&yaml).unwrap();
         let params = cfg.to_params().unwrap();
         match params.strategy {
@@ -585,7 +644,10 @@ progress: false
             "  benchmark: \"tmp_data/benchmark.csv\"\n  wap: \"w.parquet\"",
         );
         let err = parse(&yaml).unwrap_err().to_string();
-        assert!(err.contains("data.wap"), "wap 提供但 deal_price 非时段价应报错: {err}");
+        assert!(
+            err.contains("data.wap"),
+            "wap 提供但 deal_price 非时段价应报错: {err}"
+        );
     }
 
     #[test]
@@ -628,7 +690,10 @@ progress: false
         let err = BtConfig::check_shareable_data(&[("a.yml", &a), ("c.yml", &c)])
             .unwrap_err()
             .to_string();
-        assert!(err.contains("data.stock_bar") && err.contains("c.yml"), "{err}");
+        assert!(
+            err.contains("data.stock_bar") && err.contains("c.yml"),
+            "{err}"
+        );
 
         // wap 时段不一致 -> 报错
         let w3 = parse(&wap_yaml(3)).unwrap();
@@ -640,6 +705,94 @@ progress: false
         // wap 与非 wap 配置混跑允许（非 wap 配置不提供 data.wap，单配置校验已保证），
         // 但输出路径仍须不同
         BtConfig::check_shareable_data(&[("a.yml", &a), ("w1.yml", &w2)]).unwrap();
+    }
 
+    /// 写入临时 YAML 文件后走真实 `BtConfig::load`（data.dir 解析只在 load 中发生）。
+    fn load_yaml(yaml: &str) -> anyhow::Result<BtConfig> {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cfg.yml");
+        std::fs::write(&path, yaml).unwrap();
+        BtConfig::load(path.to_str().unwrap())
+    }
+
+    #[test]
+    fn data_dir_auto_discovery() {
+        let dir = tempfile::tempdir().unwrap();
+        // 多格式并存时 parquet 优先；单引号 YAML 字符串避免 Windows 路径反斜杠转义
+        for f in ["stock_bar.parquet", "stock_bar.csv", "benchmark.csv"] {
+            std::fs::write(dir.path().join(f), "x").unwrap();
+        }
+        let yaml = format!(
+            "signal: \"s.csv\"\ndata:\n  dir: '{}'\nperiod:\n  start_date: \"2026-01-01\"\n  end_date: \"2026-06-01\"\n",
+            dir.path().display()
+        );
+        let cfg = load_yaml(&yaml).unwrap();
+        assert!(
+            cfg.stock_bar().ends_with("stock_bar.parquet"),
+            "{}",
+            cfg.stock_bar()
+        );
+        assert!(
+            cfg.benchmark_data().ends_with("benchmark.csv"),
+            "{}",
+            cfg.benchmark_data()
+        );
+        assert_eq!(cfg.data.wap, None);
+    }
+
+    #[test]
+    fn data_dir_explicit_path_wins() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("benchmark.csv"), "x").unwrap();
+        let yaml = format!(
+            "signal: \"s.csv\"\ndata:\n  dir: '{}'\n  stock_bar: \"explicit/bar.csv\"\nperiod:\n  start_date: \"2026-01-01\"\n  end_date: \"2026-06-01\"\n",
+            dir.path().display()
+        );
+        // 显式 stock_bar 优先（即使目录里没有 stock_bar 文件），benchmark 由 dir 补齐
+        let cfg = load_yaml(&yaml).unwrap();
+        assert_eq!(cfg.stock_bar(), "explicit/bar.csv");
+        assert!(cfg.benchmark_data().ends_with("benchmark.csv"));
+    }
+
+    #[test]
+    fn data_dir_missing_file_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let yaml = format!(
+            "signal: \"s.csv\"\ndata:\n  dir: '{}'\nperiod:\n  start_date: \"2026-01-01\"\n  end_date: \"2026-06-01\"\n",
+            dir.path().display()
+        );
+        let err = load_yaml(&yaml).unwrap_err().to_string();
+        assert!(err.contains("stock_bar"), "缺文件报错应含主干名: {err}");
+
+        let err = load_yaml(&yaml.replace(dir.path().to_str().unwrap(), "no/such/dir"))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("data.dir"), "目录无效应报 data.dir: {err}");
+    }
+
+    #[test]
+    fn data_dir_wap_on_demand() {
+        let dir = tempfile::tempdir().unwrap();
+        for f in ["stock_bar.csv", "benchmark.csv", "wap.csv"] {
+            std::fs::write(dir.path().join(f), "x").unwrap();
+        }
+        let base = format!(
+            "signal: \"s.csv\"\ndata:\n  dir: '{}'\nperiod:\n  start_date: \"2026-01-01\"\n  end_date: \"2026-06-01\"\n",
+            dir.path().display()
+        );
+        // deal_price 非时段价：目录里的 wap.csv 被忽略，不触发 wap/deal_price 匹配报错
+        let cfg = load_yaml(&base).unwrap();
+        assert_eq!(cfg.data.wap, None);
+
+        // deal_price 为时段价：wap 按需发现
+        let cfg = load_yaml(&format!("{base}exchange:\n  deal_price: \"vwap3\"\n")).unwrap();
+        assert!(cfg.data.wap.as_deref().unwrap().ends_with("wap.csv"));
+
+        // 时段价但目录中无 wap 文件：解析期报错
+        std::fs::remove_file(dir.path().join("wap.csv")).unwrap();
+        let err = load_yaml(&format!("{base}exchange:\n  deal_price: \"vwap3\"\n"))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("wap"), "{err}");
     }
 }

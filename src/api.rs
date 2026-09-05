@@ -38,11 +38,42 @@ pub struct DataPaths {
     pub wap: Option<String>,
 }
 
+impl DataPaths {
+    /// 从目录自动发现数据文件：按文件名主干 `stock_bar` / `benchmark`（`need_wap`
+    /// 时还有 `wap`）匹配，扩展名优先级 `.parquet` > `.pq` > `.csv`
+    /// （见 [`crate::data::find_data_file`]）。stock_bar / benchmark 缺失报错；
+    /// `need_wap = false` 时即使目录中存在 wap 文件也不取用（wap 按需发现，
+    /// 避免目录里的 wap 文件影响非时段价回测）。
+    pub fn from_dir(dir: &str, need_wap: bool) -> Result<Self> {
+        use crate::data::find_data_file;
+        if !Path::new(dir).is_dir() {
+            return Err(BtError::Validation(format!(
+                "数据目录不存在或不是目录: {dir}"
+            )));
+        }
+        let find = |stem: &str| {
+            find_data_file(dir, stem).ok_or_else(|| {
+                BtError::Validation(format!(
+                    "数据目录 {dir} 中未找到 {stem} 数据文件（{stem}.parquet / {stem}.pq / {stem}.csv）"
+                ))
+            })
+        };
+        Ok(Self {
+            stock_bar: find("stock_bar")?,
+            benchmark: find("benchmark")?,
+            wap: if need_wap { Some(find("wap")?) } else { None },
+        })
+    }
+}
+
 /// 数据来源：每次 `run` 重新加载，或共享一份已加载数据多次复用（决策 D15）。
 #[derive(Debug, Clone)]
 pub enum DataSource {
     /// 从路径加载：每次 `run` 重新读取并校验数据文件。
     Paths(DataPaths),
+    /// 从目录自动发现数据文件后按 `Paths` 加载：文件名主干与优先级见
+    /// [`DataPaths::from_dir`]；wap 仅在 `deal_price` 为 vwapN/twapN 时查找。
+    Dir(String),
     /// 共享已加载的 `BTData`（内部 `Arc`，`clone` 廉价）：参数扫描等多次
     /// 回测场景只加载一次。wap 时段号在 `load_wap` 时固定，各次 run 的
     /// `deal_price` 时段须与之一致（装配期校验，不一致报错）。
@@ -211,7 +242,8 @@ impl BtOutput {
         let dir = dir.as_ref();
         std::fs::create_dir_all(dir)?;
         let path = |name: &str| dir.join(name).to_string_lossy().into_owned();
-        self.result.export_hist_position(&path(&names.hist_position))?;
+        self.result
+            .export_hist_position(&path(&names.hist_position))?;
         self.result.export_trades(&path(&names.trades))?;
         self.report.export_data(&path(&names.report_data))?;
         self.report.plot(&path(&names.report_plot))?;
@@ -223,7 +255,8 @@ impl BtOutput {
 ///
 /// 参数校验先于数据加载（数百 MB 行情读取前 fail fast）；`params` 按值传入
 /// （自定义策略 Box 被消耗）。`params.data` 为 [`DataSource::Paths`] 时每次调用
-/// 重新加载数据文件；为 [`DataSource::Shared`] 时复用已加载的 `BTData`（内部
+/// 重新加载数据文件；为 [`DataSource::Dir`] 时先从目录发现文件（解析为 Paths，
+/// wap 按需）；为 [`DataSource::Shared`] 时复用已加载的 `BTData`（内部
 /// `Arc`，参数扫描多次调用只加载一次，派生列仍按每次撮合参数重建）。
 pub fn run(params: BtParams, signal: &Signal) -> Result<BtOutput> {
     // 1. 数值参数校验（嵌入方不经过 BtConfig，须在此拦截）
@@ -279,7 +312,12 @@ pub fn run(params: BtParams, signal: &Signal) -> Result<BtOutput> {
         DealPrice::Wap { window, .. } => Some(window),
         _ => None,
     };
-    if let DataSource::Paths(paths) = &params.data {
+    // Dir 在此解析为 Paths（wap 按需发现），之后与显式 Paths 完全同路径
+    let data_source = match params.data {
+        DataSource::Dir(dir) => DataSource::Paths(DataPaths::from_dir(&dir, wap_window.is_some())?),
+        other => other,
+    };
+    if let DataSource::Paths(paths) = &data_source {
         if wap_window.is_some() && paths.wap.is_none() {
             return Err(BtError::InvalidParam(format!(
                 "deal_price={} 需要 wap 时段数据，请设置 DataPaths.wap",
@@ -295,7 +333,7 @@ pub fn run(params: BtParams, signal: &Signal) -> Result<BtOutput> {
     }
 
     // 4. 数据 -> 运行 -> 报告
-    let data = match params.data {
+    let data = match data_source {
         DataSource::Paths(paths) => {
             let mut data = BTData::new().load_stock_bar(&paths.stock_bar)?;
             if let (Some(path), Some(window)) = (&paths.wap, wap_window) {
@@ -305,9 +343,12 @@ pub fn run(params: BtParams, signal: &Signal) -> Result<BtOutput> {
         }
         // build 校验 stock_bar 存在（Backtest::new 的不变量），对共享数据同样生效
         DataSource::Shared(data) => data.build()?,
+        // Dir 已在步骤 3 解析为 Paths
+        DataSource::Dir(_) => unreachable!("Dir 已解析为 Paths"),
     };
     let account = Account::new(params.initial_cash);
-    let mut backtest = Backtest::new(data, account, exchange, strategy)?.with_progress(params.progress);
+    let mut backtest =
+        Backtest::new(data, account, exchange, strategy)?.with_progress(params.progress);
     let result = backtest.run(signal, &params.start_date, &params.end_date)?;
     let report = result.gen_report(
         params.benchmark_name.as_str(),
@@ -324,9 +365,7 @@ pub fn run_from_signal_file(params: BtParams, signal_path: &str) -> Result<BtOut
 
 /// 便捷构造：`BTreeMap<日期, (instrument, score) 列表>` -> `Signal`
 /// （`SignalDay::from_pairs` 逐日校验，口径同 `load_signal`）。
-pub fn signal_from_pairs(
-    days: BTreeMap<NaiveDate, Vec<(String, f64)>>,
-) -> Result<Signal> {
+pub fn signal_from_pairs(days: BTreeMap<NaiveDate, Vec<(String, f64)>>) -> Result<Signal> {
     let mut out = BTreeMap::new();
     for (date, pairs) in days {
         let day = SignalDay::from_pairs(pairs)?;
@@ -377,5 +416,43 @@ mod tests {
         p.strategy = StrategySpec::topk_dropout(0, 1);
         let err = run(p, &Signal::from_days(BTreeMap::new())).unwrap_err();
         assert!(err.to_string().contains("top_n"), "{err}");
+    }
+
+    #[test]
+    fn data_paths_from_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path().to_str().unwrap().to_owned();
+
+        // 目录不存在
+        let err = DataPaths::from_dir(&format!("{d}/nonexistent"), false).unwrap_err();
+        assert!(err.to_string().contains("不是目录"), "{err}");
+
+        // stock_bar 缺失时报错并指出主干名
+        let err = DataPaths::from_dir(&d, false).unwrap_err();
+        assert!(err.to_string().contains("stock_bar"), "{err}");
+
+        std::fs::write(dir.path().join("stock_bar.csv"), "x").unwrap();
+        std::fs::write(dir.path().join("benchmark.parquet"), "x").unwrap();
+        std::fs::write(dir.path().join("wap.csv"), "x").unwrap();
+
+        // need_wap = false：即使目录里有 wap 文件也不取用
+        let paths = DataPaths::from_dir(&d, false).unwrap();
+        assert!(paths.stock_bar.ends_with("stock_bar.csv"));
+        assert!(paths.benchmark.ends_with("benchmark.parquet"));
+        assert_eq!(paths.wap, None);
+
+        // need_wap = true：wap 按需发现
+        let paths = DataPaths::from_dir(&d, true).unwrap();
+        assert!(paths.wap.unwrap().ends_with("wap.csv"));
+    }
+
+    #[test]
+    fn data_paths_from_dir_wap_missing_when_needed() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path().to_str().unwrap().to_owned();
+        std::fs::write(dir.path().join("stock_bar.csv"), "x").unwrap();
+        std::fs::write(dir.path().join("benchmark.csv"), "x").unwrap();
+        let err = DataPaths::from_dir(&d, true).unwrap_err();
+        assert!(err.to_string().contains("wap"), "{err}");
     }
 }

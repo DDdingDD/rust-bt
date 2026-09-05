@@ -17,6 +17,23 @@ use polars::prelude::*;
 
 use crate::error::{BtError, Result};
 
+/// 目录发现：在 `dir` 中按文件名主干 `stem` 查找数据文件，扩展名优先级
+/// `.parquet` > `.pq` > `.csv`。找到返回完整路径，未找到返回 `None`。
+///
+/// 供 `data.dir` 目录配置（`BtConfig`）与 `DataSource::Dir`（嵌入 API）共用；
+/// 同一主干多格式并存时按优先级静默取高优先级格式（parquet 与 CSV 内容
+/// 口径一致，仅物理存储不同，见 [`read_dataframe`]）。
+pub fn find_data_file(dir: &str, stem: &str) -> Option<String> {
+    let dir = Path::new(dir);
+    for ext in ["parquet", "pq", "csv"] {
+        let path = dir.join(format!("{stem}.{ext}"));
+        if path.is_file() {
+            return Some(path.to_string_lossy().into_owned());
+        }
+    }
+    None
+}
+
 /// 按扩展名读取 DataFrame：`.parquet` / `.pq` 走 parquet，其余（含无扩展名）按 CSV。
 ///
 /// 两种格式的列要求与校验完全一致（规范"数据文件格式"），parquet 仅是另一种
@@ -169,5 +186,42 @@ impl std::fmt::Debug for BTData {
             .field("benchmark", &self.benchmark.is_some())
             .field("wap", &self.wap.as_ref().map(|w| w.window))
             .finish()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn find_data_file_extension_priority() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path().to_str().unwrap();
+        assert!(find_data_file(d, "stock_bar").is_none());
+
+        // 只有 csv 时命中 csv
+        std::fs::write(dir.path().join("stock_bar.csv"), "x").unwrap();
+        assert!(find_data_file(d, "stock_bar")
+            .unwrap()
+            .ends_with("stock_bar.csv"));
+
+        // 并存时 parquet 优先于 pq 优先于 csv
+        std::fs::write(dir.path().join("stock_bar.pq"), "x").unwrap();
+        assert!(find_data_file(d, "stock_bar")
+            .unwrap()
+            .ends_with("stock_bar.pq"));
+        std::fs::write(dir.path().join("stock_bar.parquet"), "x").unwrap();
+        assert!(find_data_file(d, "stock_bar")
+            .unwrap()
+            .ends_with("stock_bar.parquet"));
+
+        // 主干精确匹配：前缀相似的文件不误命中
+        assert!(find_data_file(d, "benchmark").is_none());
+        std::fs::write(dir.path().join("benchmark_1min.csv"), "x").unwrap();
+        assert!(find_data_file(d, "benchmark").is_none());
+
+        // 目录而非文件不命中
+        std::fs::create_dir(dir.path().join("wap.csv")).unwrap();
+        assert!(find_data_file(d, "wap").is_none());
     }
 }

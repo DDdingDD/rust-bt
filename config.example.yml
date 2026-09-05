@@ -16,6 +16,11 @@ data:
   benchmark: "tmp_data/benchmark.csv" # 基准收益
   # wap: "tmp_data/wap.parquet"       # wap 时段数据：deal_price 为 vwapN/twapN 时必填
                                       # 时段表见 doc/specification.md "数据文件格式--wap 数据"
+  # 也可改为目录自动发现：dir 指向数据目录，系统按文件名主干 stock_bar /
+  # benchmark / wap 查找，扩展名优先级 .parquet > .pq > .csv；显式路径
+  # 优先于目录发现（可只显式覆盖其中一项）；wap 仅在 deal_price 为
+  # vwapN/twapN 时查找（目录里的 wap 文件不影响非时段价回测）
+  # dir: "tmp_data"
 
 # 回测区间（必填）：闭开区间 [start_date, end_date)，自动按交易日历对齐
 period:

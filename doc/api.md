@@ -92,7 +92,7 @@ fn main() -> anyhow::Result<()> {
 | 类型 | 说明 |
 | --- | --- |
 | `BtParams` | 回测参数（§4） |
-| `DataSource` | 数据来源：`Paths(DataPaths)` 每次 run 重新加载 / `Shared(BTData)` 共享已加载数据（§4.4） |
+| `DataSource` | 数据来源：`Paths(DataPaths)` 每次 run 重新加载 / `Dir(String)` 目录自动发现 / `Shared(BTData)` 共享已加载数据（§4.4） |
 | `DataPaths` | 数据文件路径：stock_bar / benchmark / wap（§4.1） |
 | `StrategySpec` | 策略规格：`TopkDropout{..}` / `Topk{..}` 参数化 / `Custom(Box<dyn Strategy>)` 注入 |
 | `ExchangeParams` | 撮合与成本参数（实现 `Default`，默认值对齐 CLI） |
@@ -111,7 +111,7 @@ fn main() -> anyhow::Result<()> {
 
 | 字段 | 类型 | 约束 / 说明 |
 | --- | --- | --- |
-| `data` | `DataSource` | 数据来源：`Paths(DataPaths)` 每次 run 从文件重新加载；`Shared(BTData)` 复用已加载数据（多次 run 只加载一次，见 §4.4） |
+| `data` | `DataSource` | 数据来源：`Paths(DataPaths)` 每次 run 从文件重新加载；`Dir(String)` 从目录自动发现文件（按主干名 stock_bar / benchmark / wap 匹配，扩展名优先级 parquet > pq > csv，wap 仅在 deal_price 为时段价时查找，解析后走 Paths 同一路径）；`Shared(BTData)` 复用已加载数据（多次 run 只加载一次，见 §4.4） |
 | `start_date` / `end_date` | `String` | `YYYY-MM-DD`；闭开区间 `[start, end)`，按交易日历自动对齐 |
 | `initial_cash` | `f64` | 期初资金，须为正的有限值 |
 | `strategy` | `StrategySpec` | 见 §4.3 与 §8 |
@@ -165,6 +165,10 @@ pub enum StrategySpec {
 ```rust
 pub enum DataSource {
     Paths(DataPaths),   // 每次 run 重新加载数据文件
+    Dir(String),        // 目录自动发现（文件名主干 stock_bar / benchmark / wap，
+                        // 扩展名优先级 parquet > pq > csv；wap 仅在 deal_price 为
+                        // vwapN/twapN 时查找），解析为 Paths 后走同一加载路径；
+                        // 也可用 DataPaths::from_dir(dir, need_wap) 预先解析
     Shared(BTData),     // 复用已加载数据（内部 Arc，clone 廉价）
 }
 ```
